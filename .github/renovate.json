@@ -10,8 +10,7 @@
   ],
   "platformAutomerge": true,
   "ignorePaths": [
-    "**/docs/**",
-    "**/charts/**"
+    "**/docs/**"
   ],
   "schedule": [
     "before 4am"
@@ -31,14 +30,25 @@
     },
     {
       "matchUpdateTypes": [
+        "major"
+      ],
+      "semanticCommitType": "fix",
+      "matchFileNames": [
+        "src/**"
+      ]
+    },
+    {
+      "matchUpdateTypes": [
         "minor",
         "patch",
         "digest"
       ],
       "automerge": true,
       "matchFileNames": [
-        "tests/**",
-        "benchmarks/**"
+        "benchmarks/**",
+        "global.json",
+        "samples/**",
+        "tests/**"
       ]
     }
   ]
