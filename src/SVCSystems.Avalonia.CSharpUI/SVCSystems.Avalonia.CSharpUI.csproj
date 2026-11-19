@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <LangVersion>preview</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <Title>SVCSystems.Avalonia.CSharpUI</Title>
+    <PackageId>SVCSystems.Avalonia.CSharpUI</PackageId>
+    <Description>Fluent, XAML-free UI composition library for Avalonia in pure C#</Description>
+    <Authors>Ivan Josipovic</Authors>
+    <PackageTags>Avalonia CSharp Fluent Builder Markup</PackageTags>
+    <RepositoryUrl>https://github.com/IvanJosipovic/SVCSystems.Avalonia.CSharpUI</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsAotCompatible>true</IsAotCompatible>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\docs\architecture.md" Pack="true" PackagePath="docs\" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="" />
+    <ProjectReference Include="..\SVCSystems.Avalonia.CSharpUI.SourceGenerator\SVCSystems.Avalonia.CSharpUI.SourceGenerator.csproj" ReferenceOutputAssembly="true">
+      <PrivateAssets>all</PrivateAssets>
+    </ProjectReference>
+    <None Remove="$(OutputPath)/$(AssemblyName).SourceGenerator.dll" />
+    <!-- Package the generator in the analyzer directory of the nuget package -->
+    <None Include="../SVCSystems.Avalonia.CSharpUI.SourceGenerator/bin/$(Configuration)/netstandard2.0/SVCSystems.Avalonia.CSharpUI.SourceGenerator.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Avalonia" />
+    <Using Include="Avalonia.Controls" />
+    <Using Include="Avalonia.Data" />
+    <Using Include="Avalonia.Interactivity" />
+    <Using Include="Avalonia.Layout" />
+    <Using Include="Avalonia.Media" />
+    <Using Include="Avalonia.Threading" />
+    <Using Include="System" />
+    <Using Include="System.Collections" />
+    <Using Include="System.Collections.ObjectModel" />
+    <Using Include="System.ComponentModel" />
+  </ItemGroup></Project>

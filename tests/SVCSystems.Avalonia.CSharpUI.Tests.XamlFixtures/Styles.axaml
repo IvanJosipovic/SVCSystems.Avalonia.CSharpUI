@@ -1,0 +1,5 @@
+<Styles xmlns="https://github.com/avaloniaui">
+  <Style Selector="Button">
+    <Setter Property="Tag" Value="styled" />
+  </Style>
+</Styles>

@@ -1,6 +1,6 @@
 # Architecture
 
-CSharpUI creates real Avalonia controls. It does not build a virtual tree or reconcile controls after each update. Avalonia remains responsible for control behavior, dependency properties, bindings, styles, layout, and routed events.
+SVCSystems.Avalonia.CSharpUI creates real Avalonia controls. It does not build a virtual tree or reconcile controls after each update. Avalonia remains responsible for control behavior, dependency properties, bindings, styles, layout, and routed events.
 
 The source generator reads Avalonia symbols into a `ControlModel` before emitting fluent APIs. It follows the base-type chain and records declared and inherited members, CLR wrappers, Avalonia property fields, events, attached properties, content slots, and constructors. Property ownership is classified as registered, inherited, added with `AddOwner`, or changed with `OverrideMetadata`. CLR overrides and shadowed members are represented separately.
 
@@ -11,7 +11,7 @@ Fluent property setters call the original CLR property or Avalonia property. Exp
 Generated control factories return the actual control type and attach source metadata:
 
 ```csharp
-using static CSharpUI.Avalonia.GeneratedControlFactories;
+using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;
 
 var button = Button().Content("Save");
 ```
@@ -26,11 +26,11 @@ Controls declared in the current project are analyzed automatically. To generate
 [assembly: GenerateMarkupExtensionsForAssembly(typeof(MyControl))]
 ```
 
-The generated methods are internal by default. Set `generatePublicExtensions: true` to publish them for consumers. If more than one referenced assembly publishes the same Avalonia extension provider, diagnostic `CSUIGEN001` reports the conflict. If control analysis or emission fails, `CSUIGEN003` reports the control and error at compile time.
+The generated methods are internal by default. Set `generatePublicExtensions: true` to publish them for consumers. If more than one referenced assembly publishes the same Avalonia extension provider, diagnostic `SVCUIGEN001` reports the conflict. If control analysis or emission fails, `SVCUIGEN003` reports the control and error at compile time.
 
 ## Generator metadata
 
-`CSharpUIGeneratorMetadataAttribute` describes exceptional APIs without adding control-name checks to emitters:
+`SVCSystemsCSharpUIGeneratorMetadataAttribute` describes exceptional APIs without adding control-name checks to emitters:
 
 - `Ignore = true` suppresses generated APIs for a control or member.
 - `Alias = "Caption"` changes a generated factory or fluent method name.
@@ -38,6 +38,10 @@ The generated methods are internal by default. Set `generatePublicExtensions: tr
 - `Content = true` marks a property as a content slot for generator tooling.
 
 The attribute does not rename Avalonia properties, events, or CLR members.
+
+## Compiled XAML resource factories
+
+`[assembly: GenerateXamlResource("avares://Assembly/Path.axaml", "FactoryName")]` asks `XamlResourceGenerator` to emit an internal factory in `SVCSystems.Avalonia.CSharpUI`. The generator locates the referenced assembly's public `CompiledAvaloniaXaml.!AvaloniaResources` `Build:/path` method and calls it through `UnsafeAccessor`, with no reflection or runtime URI loading. `Create(IServiceProvider?)` supplies a parent XAML service provider and returns a fresh `ResourceDictionary` or `Styles` instance. Supported on .NET 10+ only (`SVCUIGEN002`); invalid requests report `SVCUIGEN004` and unavailable or incompatible compiled factories report `SVCUIGEN005`.
 
 ## Samples
 

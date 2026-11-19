@@ -1,0 +1,6 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:fixture="using:SVCSystems.Avalonia.CSharpUI.Tests.XamlFixtures">
+  <Style Selector="Button">
+    <Setter Property="Tag" Value="{fixture:ServiceValue}" />
+  </Style>
+</Styles>
