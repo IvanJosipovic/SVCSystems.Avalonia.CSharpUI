@@ -164,7 +164,10 @@ internal sealed class ControlCatalog
             }
 
             attachedHostsByName.Add(extensionName, type);
-            if (!byKey.ContainsKey(key))
+
+            // Controls are registered by Add(); only non-control hosts need a key here, otherwise
+            // Add() would see an existing key and skip their normal control registration.
+            if (!type.IsOrInheritsFrom("Avalonia.AvaloniaObject") && !byKey.ContainsKey(key))
             {
                 byKey.Add(key, type);
             }
