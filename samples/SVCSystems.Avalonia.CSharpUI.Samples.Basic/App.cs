@@ -1,11 +1,6 @@
-using SVCSystems.Avalonia.CSharpUI.Samples.Basic.Views;
-
-[assembly: GenerateMarkupExtensionsForAvalonia]
-
 var lifetime = new ClassicDesktopStyleApplicationLifetime
 {
-    Args = args,
-    ShutdownMode = ShutdownMode.OnLastWindowClose
+    Args = args
 };
 
 var appBuilder = AppBuilder.Configure<Application>()
@@ -18,7 +13,7 @@ var appBuilder = AppBuilder.Configure<Application>()
 
 lifetime.MainWindow = new Window
 {
-    Content = new MainView(),
+    Content = MainView(),
     Title = "CSharpUI Basic Sample"
 };
 

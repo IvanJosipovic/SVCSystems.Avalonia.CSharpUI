@@ -1,5 +1,4 @@
 using SVCSystems.Avalonia.CSharpUI.Samples.CustomControls.Controls;
-using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;
 
 namespace SVCSystems.Avalonia.CSharpUI.Samples.CustomControls.Views;
 

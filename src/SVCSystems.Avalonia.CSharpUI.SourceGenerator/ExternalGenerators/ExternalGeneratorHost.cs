@@ -15,7 +15,7 @@ internal sealed class ExternalGeneratorHost
     private readonly ExtensionGroupGenerator[] _groupGenerators =
     [
         new("Properties",
-            static model => GetPropertyInfos(model),
+            static (model, compilation) => GetPropertyInfos(model, compilation),
 
             new ValueSetterGenerator(),
             new BindFromExpressionSetterGenerator(),
@@ -24,7 +24,7 @@ internal sealed class ExternalGeneratorHost
         ),
 
         new("Attached Properties",
-            static model => GetAttachedPropertyInfos(model),
+            static (model, compilation) => GetAttachedPropertyInfos(model, compilation),
 
             new AttachedPropertyValueSetterGenerator(),
             new AttachedPropertyBindFromExpressionSetterGenerator(),
@@ -32,13 +32,13 @@ internal sealed class ExternalGeneratorHost
         ),
 
         new("Events",
-            static model => GetEventInfos(model),
+            static (model, compilation) => GetEventInfos(model, compilation),
 
             new ActionToEventGenerator()
         ),
 
         new("Styles",
-            static model => GetStyleInfos(model),
+            static (model, compilation) => GetStyleInfos(model, compilation),
 
             new ValueStyleSetterGenerator(),
             new BindFromExpressionStyleSetterGenerator(),
@@ -47,7 +47,7 @@ internal sealed class ExternalGeneratorHost
         )
     ];
 
-    internal static IEnumerable<PropertyExtensionInfo> GetPropertyInfos(ControlModel model)
+    internal static IEnumerable<PropertyExtensionInfo> GetPropertyInfos(ControlModel model, Compilation? compilation = null)
     {
         var propertiesByField = model.DeclaredProperties
             .Where(static property => !property.IsIgnored &&
@@ -60,34 +60,35 @@ internal sealed class ExternalGeneratorHost
         return model.Type.GetMembers()
             .OfType<IFieldSymbol>()
             .Where(propertiesByField.ContainsKey)
-            .Select(field => new PropertyExtensionInfo(field, propertiesByField[field].ExtensionName));
+            .Select(field => new PropertyExtensionInfo(field, propertiesByField[field].ExtensionName, compilation));
     }
 
-    internal static IEnumerable<AttachedPropertyExtensionInfo> GetAttachedPropertyInfos(ControlModel model) =>
+    internal static IEnumerable<AttachedPropertyExtensionInfo> GetAttachedPropertyInfos(ControlModel model, Compilation? compilation = null) =>
         model.DeclaredAttachedProperties
             .Where(static property => !property.IsIgnored)
-            .Select(static property => new AttachedPropertyExtensionInfo(property.Field, property.ExtensionName))
+            .Select(property => new AttachedPropertyExtensionInfo(property.Field, property.ExtensionName, compilation))
             .Where(static x => !string.IsNullOrWhiteSpace(x.AttachedPropertyHostTypeName));
 
-    internal static IEnumerable<EventExtensionInfo> GetEventInfos(ControlModel model) =>
+    internal static IEnumerable<EventExtensionInfo> GetEventInfos(ControlModel model, Compilation? compilation = null) =>
         model.DeclaredEvents
             .Where(static eventModel => !eventModel.IsIgnored && eventModel.InheritanceKind != PropertyInheritanceKind.Override)
-            .Select(static eventModel => new EventExtensionInfo(eventModel.Symbol, eventModel.ExtensionName));
+            .Select(eventModel => new EventExtensionInfo(eventModel.Symbol, eventModel.ExtensionName, compilation));
 
-    internal static IEnumerable<PropertyExtensionInfo> GetStyleInfos(ControlModel model) =>
+    internal static IEnumerable<PropertyExtensionInfo> GetStyleInfos(ControlModel model, Compilation? compilation = null) =>
         !model.Type.IsStyledElement()
             ? []
             : model.StylePropertyFields
                 .Where(static x => !x.HasUnsupportedExternalValueType())
                 .Where(static field => !ControlModelBuilder.GetMetadata(field).Ignore)
-                .Select(static field => new PropertyExtensionInfo(
+                .Select(field => new PropertyExtensionInfo(
                     field,
-                    ControlModelBuilder.GetMetadata(field).Alias));
+                    ControlModelBuilder.GetMetadata(field).Alias,
+                    compilation));
 
-    public string? GenerateExtensions(INamedTypeSymbol controlType, bool generatePublicExtensions)
-        => GenerateExtensions(ControlModelBuilder.Build(controlType), generatePublicExtensions);
+    public string? GenerateExtensions(INamedTypeSymbol controlType, Compilation? compilation = null)
+        => GenerateExtensions(ControlModelBuilder.Build(controlType), compilation);
 
-    internal string? GenerateExtensions(ControlModel controlModel, bool generatePublicExtensions)
+    internal string? GenerateExtensions(ControlModel controlModel, Compilation? compilation = null)
     {
         if (controlModel.IgnoreGeneratedExtensions)
         {
@@ -98,7 +99,7 @@ internal sealed class ExternalGeneratorHost
 
         foreach (var groupGenerator in _groupGenerators)
         {
-            var extensions = groupGenerator.Generate(controlModel, out var generatedCount);
+            var extensions = groupGenerator.Generate(controlModel, compilation, out var generatedCount);
             if (generatedCount == 0 || string.IsNullOrWhiteSpace(extensions))
             {
                 continue;
@@ -125,10 +126,13 @@ internal sealed class ExternalGeneratorHost
         sb.AppendLine("using System.Runtime.CompilerServices;");
         sb.AppendLine();
         sb.AppendLine("namespace SVCSystems.Avalonia.CSharpUI;");
+        var typeName = controlModel.Type.GetFullTypeName();
+        sb.AppendLine("/// <summary>");
+        sb.AppendLine($"/// Fluent setters, binding helpers, event helpers and style setters for <see cref=\"{typeName}\"/>.");
+        sb.AppendLine("/// </summary>");
         sb.AppendLine("[global::System.CodeDom.Compiler.GeneratedCode(\"SVCSystems.Avalonia.CSharpUI.SourceGenerator\", \"1.0.0.0\")]");
         sb.AppendLine("[global::System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]");
-        var accessibility = generatePublicExtensions ? "public" : "internal";
-        sb.AppendLine($"{accessibility} static partial class {SymbolUtilities.BuildExtensionClassName(controlModel.Type)}");
+        sb.AppendLine($"internal static partial class {SymbolUtilities.BuildExtensionClassName(controlModel.Type)}");
         sb.AppendLine("{");
 
         foreach (var group in generatedGroups)

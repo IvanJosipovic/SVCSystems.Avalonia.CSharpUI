@@ -3,7 +3,6 @@ using Avalonia;
 using Avalonia.Controls;
 using SVCSystems.Avalonia.CSharpUI;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
-using SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using System.Runtime.InteropServices;
@@ -47,9 +46,9 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
-    public void Avalonia_extensions_are_generated_internal_by_default_without_custom_control_extensions()
+    public void Used_control_generates_internal_extensions_and_unused_controls_do_not()
     {
-        var result = RunGenerator(CreateCompilation("NoGenerationAttributes", CreateSource(string.Empty, """
+        var result = RunGenerator(CreateCompilation("UsedControl", CreateSource(string.Empty, """
             public static class Usage
             {
                 public static Button SetWidth() => new Button().Width(120);
@@ -60,15 +59,69 @@ public class MarkupExtensionGenerationTests
         Assert.Contains(result.GeneratedSources, source =>
             source.Contains("internal static partial class Avalonia_Controls_Button_MarkupExtensions", StringComparison.Ordinal));
         Assert.DoesNotContain(result.GeneratedSources, source =>
-            source.Contains("MarkupExtensionGeneratorFixture_FixtureControl_MarkupExtensions", StringComparison.Ordinal));
+            source.Contains("Avalonia_Controls_DatePicker_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Common_controls_are_generated_without_being_mentioned_in_source()
+    {
+        var result = RunGenerator(CreateCompilation("CommonControls", "using Avalonia.Controls;"));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, source =>
+            source.Contains("internal static partial class Avalonia_Controls_TextBlock_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains(result.GeneratedSources, source =>
+            source.Contains("internal static partial class Avalonia_Controls_StackPanel_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains(result.GeneratedSources, source =>
+            source.Contains("internal static partial class Avalonia_Layout_Layoutable_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Local_control_declaration_is_a_usage_root()
+    {
+        var result = RunGenerator(CreateCompilation("LocalControlRoot", CreateSource(string.Empty, string.Empty)));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, source =>
+            source.Contains($"internal static partial class {FixtureNamespace}_FixtureControl_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Factory_call_name_is_detected_without_an_explicit_type_reference()
+    {
+        const string source = """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+            using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;
+
+            public static class Usage
+            {
+                public static Button Create() => Button();
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("FactoryCallUsage", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, generated =>
+            generated.Contains("public static global::Avalonia.Controls.Button Button(", StringComparison.Ordinal));
     }
 
     [Fact]
     public void Binding_valued_Avalonia_properties_generate_value_and_compiled_binding_setters()
     {
-        var result = RunGenerator(CreateCompilation(
-            "BindingValuedAvaloniaProperties",
-            CreateSource("[assembly: GenerateMarkupExtensionsForAvalonia]", string.Empty)));
+        var usage = """
+            public static class Usage
+            {
+                public static void Mention()
+                {
+                    _ = typeof(AutoCompleteBox);
+                    _ = typeof(ItemsControl);
+                    _ = typeof(Avalonia.Controls.Primitives.SelectingItemsControl);
+                    _ = typeof(TableViewColumn);
+                }
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("BindingValuedAvaloniaProperties", CreateSource(string.Empty, usage)));
 
         AssertNoErrors(result.OutputCompilation);
 
@@ -115,8 +168,6 @@ public class MarkupExtensionGenerationTests
             using Avalonia;
             using Avalonia.Controls;
             using SVCSystems.Avalonia.CSharpUI;
-
-            [assembly: GenerateMarkupExtensionsForAssembly(typeof(InheritanceFixture.BaseControl))]
 
             namespace InheritanceFixture
             {
@@ -182,313 +233,372 @@ public class MarkupExtensionGenerationTests
             """);
         var controlsReference = EmitReference(controls);
         var source = """
-            using SVCSystems.Avalonia.CSharpUI;
             using ExternalFactoryFixture;
 
-            [assembly: GenerateMarkupExtensionsForAssembly(typeof(InternalConstructorControl))]
+            public static class Usage
+            {
+                public static void Mention()
+                {
+                    _ = typeof(PublicConstructorControl);
+                    _ = typeof(InternalConstructorControl);
+                }
+            }
             """;
         var compilation = CreateCompilationWithReferences("ExternalFactoryConsumer", source, controlsReference);
-        GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            [new ControlFactoryGenerator().AsSourceGenerator()],
-            parseOptions: new CSharpParseOptions(LanguageVersion.Preview));
+        var result = RunGenerator(compilation);
 
-        driver = driver.RunGeneratorsAndUpdateCompilation(
-            compilation,
-            out var outputCompilation,
-            out var driverDiagnostics,
-            TestContext.Current.CancellationToken);
-        var runResult = driver.GetRunResult();
-        var generated = runResult.Results
-            .SelectMany(static result => result.GeneratedSources)
-            .Select(static sourceResult => sourceResult.SourceText.ToString())
-            .ToImmutableArray();
-
-        Assert.Empty(driverDiagnostics.Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
-        Assert.Empty(runResult.Diagnostics.Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
-        AssertNoErrors((CSharpCompilation)outputCompilation);
-        var factorySource = Assert.Single(generated, static sourceText =>
+        AssertNoErrors(result.OutputCompilation);
+        var factorySource = Assert.Single(result.GeneratedSources, static sourceText =>
             sourceText.Contains("internal static class GeneratedControlFactories", StringComparison.Ordinal));
         Assert.Contains("PublicConstructorControl", factorySource, StringComparison.Ordinal);
         Assert.DoesNotContain("InternalConstructorControl(", factorySource, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public void Avalonia_and_custom_control_options_generate_compilable_extensions(
-        bool avaloniaExtensionsArePublic,
-        bool customControlExtensionsArePublic)
+    [Fact]
+    public void Metadata_alias_changes_the_detected_factory_name()
     {
-        var avaloniaAttribute = avaloniaExtensionsArePublic
-            ? "[assembly: GenerateMarkupExtensionsForAvalonia(generatePublicExtensions: true)]"
-            : "[assembly: GenerateMarkupExtensionsForAvalonia]";
-        var customAttribute = customControlExtensionsArePublic
-            ? "[assembly: GenerateMarkupExtensionsForAssembly(typeof(MarkupExtensionGeneratorFixture.FixtureControl), generatePublicExtensions: true)]"
-            : "[assembly: GenerateMarkupExtensionsForAssembly(typeof(MarkupExtensionGeneratorFixture.FixtureControl))]";
-        var result = RunGenerator(CreateCompilation($"Accessibility_{avaloniaExtensionsArePublic}_{customControlExtensionsArePublic}", CreateSource($"{avaloniaAttribute}\n{customAttribute}", """
+        const string source = """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            [SVCSystemsCSharpUIGeneratorMetadata(Alias = "Badge")]
+            public sealed class LevelBadge : ContentControl { }
+
             public static class Usage
             {
-                public static Button SetWidth() => new Button().Width(123);
-                public static FixtureControl SetValue() => new FixtureControl().Value(42);
+                public static LevelBadge Create() => new LevelBadge();
             }
-            """)));
+            """;
+        var result = RunGenerator(CreateCompilation("AliasFactory", source));
 
         AssertNoErrors(result.OutputCompilation);
-        Assert.Contains(result.GeneratedSources, source => source.Contains(
-            $"{(avaloniaExtensionsArePublic ? "public" : "internal")} static partial class Avalonia_Controls_Button_MarkupExtensions",
-            StringComparison.Ordinal));
-        Assert.Contains(result.GeneratedSources, source => source.Contains(
-            $"{(customControlExtensionsArePublic ? "public" : "internal")} static partial class {FixtureNamespace}_FixtureControl_MarkupExtensions",
-            StringComparison.Ordinal));
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Assembly_specific_attribute_generates_custom_control_extensions(bool generatePublicExtensions)
-    {
-        var attribute = generatePublicExtensions
-            ? "[assembly: GenerateMarkupExtensionsForAssembly(typeof(MarkupExtensionGeneratorFixture.FixtureControl), generatePublicExtensions: true)]"
-            : "[assembly: GenerateMarkupExtensionsForAssembly(typeof(MarkupExtensionGeneratorFixture.FixtureControl))]";
-        var result = RunGenerator(CreateCompilation("AssemblySpecific_" + generatePublicExtensions, CreateSource(attribute, """
-            public static class Usage
-            {
-                public static FixtureControl SetValue() => new FixtureControl().Value(42);
-            }
-            """)));
-
-        AssertNoErrors(result.OutputCompilation);
-        Assert.Contains(result.GeneratedSources, source => source.Contains(
-            $"{(generatePublicExtensions ? "public" : "internal")} static partial class {FixtureNamespace}_FixtureControl_MarkupExtensions",
-            StringComparison.Ordinal));
-        Assert.Contains(result.GeneratedSources, source => source.Contains(
-            "internal static partial class Avalonia_Controls_Button_MarkupExtensions",
-            StringComparison.Ordinal));
+        var factorySource = Assert.Single(result.GeneratedSources, static sourceText =>
+            sourceText.Contains("internal static class GeneratedControlFactories", StringComparison.Ordinal));
+        Assert.Contains("public static global::LevelBadge Badge([global::", factorySource, StringComparison.Ordinal);
+        Assert.DoesNotContain("public static global::LevelBadge LevelBadge([global::", factorySource, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Public_generated_extensions_compile_and_are_consumed_by_a_referencing_compilation()
+    public void Ambiguous_factory_name_reports_SVCUIGEN006()
     {
-        var librarySource = CreateSource(
+        static PortableExecutableReference CreateProvider(string assemblyName, string @namespace) =>
+            EmitReference(CreateCompilation(assemblyName, $$"""
+                using Avalonia;
+                using Avalonia.Controls;
+                using SVCSystems.Avalonia.CSharpUI;
+
+                namespace {{@namespace}}
+                {
+                    public sealed class SharedName : Control
+                    {
+                        public static readonly StyledProperty<int> ValueProperty =
+                            AvaloniaProperty.Register<SharedName, int>(nameof(Value));
+
+                        public int Value
+                        {
+                            get => GetValue(ValueProperty);
+                            set => SetValue(ValueProperty, value);
+                        }
+                    }
+                }
+                """));
+
+        var first = CreateProvider("AmbiguousProviderOne", "AmbiguousOne");
+        var second = CreateProvider("AmbiguousProviderTwo", "AmbiguousTwo");
+        var consumer = RunGenerator(CreateCompilationWithReferences(
+            "AmbiguousConsumer",
             """
-            [assembly: GenerateMarkupExtensionsForAvalonia(generatePublicExtensions: true)]
-            [assembly: GenerateMarkupExtensionsForAssembly(typeof(MarkupExtensionGeneratorFixture.FixtureControl), generatePublicExtensions: true)]
+            public static class Usage
+            {
+                public static void Mention() => _ = new AmbiguousOne.SharedName();
+            }
             """,
-            "");
-        var libraryResult = RunGenerator(CreateCompilation("PublicExtensionsLibrary", librarySource));
-        AssertNoErrors(libraryResult.OutputCompilation);
-
-        using var libraryStream = new MemoryStream();
-        var emitResult = libraryResult.OutputCompilation.Emit(libraryStream, cancellationToken: TestContext.Current.CancellationToken);
-        Assert.True(emitResult.Success, string.Join(Environment.NewLine, emitResult.Diagnostics));
-
-        var referencedLibrary = MetadataReference.CreateFromImage(ImmutableArray.CreateRange(libraryStream.ToArray()));
-        var consumerSource = """
-            using Avalonia.Controls;
-            using SVCSystems.Avalonia.CSharpUI;
-            using MarkupExtensionGeneratorFixture;
-
-            public static class Consumer
-            {
-                public static Button SetWidth() => new Button().Width(240);
-                public static FixtureControl SetValue() => new FixtureControl().Value(99);
-            }
-            """;
-        var consumerResult = RunGenerator(CreateCompilation("PublicExtensionsConsumer", consumerSource, referencedLibrary));
-
-        AssertNoErrors(consumerResult.OutputCompilation);
-        Assert.DoesNotContain(consumerResult.GeneratedSources, source =>
-            source.Contains("Avalonia_Controls_Button_MarkupExtensions", StringComparison.Ordinal));
-        Assert.DoesNotContain(consumerResult.GeneratedSources, source =>
-            source.Contains($"{FixtureNamespace}_FixtureControl_MarkupExtensions", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public void Multiple_referenced_public_Avalonia_extension_providers_report_a_warning()
-    {
-        var firstProvider = CreatePublicAvaloniaExtensionsReference("FirstPublicExtensionsProvider");
-        var secondProvider = CreatePublicAvaloniaExtensionsReference("SecondPublicExtensionsProvider");
-        var consumer = RunGenerator(CreateCompilationWithReferences(
-            "MultiplePublicExtensionsConsumer",
-            CreateSource(string.Empty, """
-                public static class ConsumerUsage
-                {
-                    public static Button SetWidth() => new Button().Width(120);
-                }
-                """),
-            firstProvider,
-            secondProvider));
-
-        var warning = Assert.Single(consumer.Diagnostics.Where(static diagnostic =>
-            diagnostic.Id == "SVCUIGEN001"));
-
-        Assert.Equal(DiagnosticSeverity.Warning, warning.Severity);
-        Assert.Contains("Avalonia.Controls.Button", warning.GetMessage(), StringComparison.Ordinal);
-        Assert.Contains("FirstPublicExtensionsProvider", warning.GetMessage(), StringComparison.Ordinal);
-        Assert.Contains("SecondPublicExtensionsProvider", warning.GetMessage(), StringComparison.Ordinal);
-        Assert.DoesNotContain(consumer.GeneratedSources, static source =>
-            source.Contains("Avalonia_Controls_Button_MarkupExtensions", StringComparison.Ordinal));
-        Assert.Contains(
-            consumer.OutputCompilation.GetDiagnostics(TestContext.Current.CancellationToken),
-            static diagnostic => diagnostic.Id == "CS0121");
-    }
-
-    [Fact]
-    public void Single_referenced_public_Avalonia_extension_provider_does_not_report_a_warning()
-    {
-        var provider = CreatePublicAvaloniaExtensionsReference("SinglePublicExtensionsProvider");
-        var consumer = RunGenerator(CreateCompilationWithReferences(
-            "SinglePublicExtensionsConsumer",
-            CreateSource(string.Empty, ""),
-            provider));
-
-        Assert.DoesNotContain(consumer.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN001");
-    }
-
-    [Fact]
-    public void Same_named_handwritten_extension_classes_do_not_report_a_warning()
-    {
-        const string handwrittenExtensions = """
-            using Avalonia.Controls;
-
-            namespace SVCSystems.Avalonia.CSharpUI
-            {
-                public static class Avalonia_Controls_Button_MarkupExtensions
-                {
-                    public static Button Width(this Button button, double width) => button;
-                }
-            }
-            """;
-        var firstProvider = EmitReference(CreateCompilation("HandwrittenProviderOne", handwrittenExtensions));
-        var secondProvider = EmitReference(CreateCompilation("HandwrittenProviderTwo", handwrittenExtensions));
-        var consumer = RunGenerator(CreateCompilationWithReferences(
-            "HandwrittenExtensionsConsumer",
-            CreateSource(string.Empty, ""),
-            firstProvider,
-            secondProvider));
-
-        Assert.DoesNotContain(consumer.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN001");
-    }
-
-    [Theory]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    public void Options_for_the_same_Avalonia_assembly_merge_to_public(
-        bool avaloniaAttributeIsPublic,
-        bool assemblyAttributeIsPublic)
-    {
-        var avaloniaAttribute = avaloniaAttributeIsPublic
-            ? "[assembly: GenerateMarkupExtensionsForAvalonia(generatePublicExtensions: true)]"
-            : "[assembly: GenerateMarkupExtensionsForAvalonia]";
-        var assemblyAttribute = assemblyAttributeIsPublic
-            ? "[assembly: GenerateMarkupExtensionsForAssembly(typeof(Button), generatePublicExtensions: true)]"
-            : "[assembly: GenerateMarkupExtensionsForAssembly(typeof(Button))]";
-        var result = RunGenerator(CreateCompilation(
-            $"MergeOptions_{avaloniaAttributeIsPublic}_{assemblyAttributeIsPublic}",
-            CreateSource($"{avaloniaAttribute}\n{assemblyAttribute}", """
-                public static class Usage
-                {
-                    public static Button SetWidth() => new Button().Width(123);
-                }
-                """)));
-
-        AssertNoErrors(result.OutputCompilation);
-        Assert.Contains(result.GeneratedSources, source => source.Contains(
-            "public static partial class Avalonia_Controls_Button_MarkupExtensions",
-            StringComparison.Ordinal));
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Assembly_attribute_can_target_a_control_from_a_referenced_assembly(bool generatePublicExtensions)
-    {
-        var controlLibrary = CreateCompilation("ReferencedControls", CreateSource(string.Empty, ""));
-        var controlLibraryReference = EmitReference(controlLibrary);
-        var generatePublicOption = generatePublicExtensions ? ", generatePublicExtensions: true" : string.Empty;
-        var consumerSource = $$"""
-            using SVCSystems.Avalonia.CSharpUI;
-            using MarkupExtensionGeneratorFixture;
-
-            [assembly: GenerateMarkupExtensionsForAssembly(typeof(FixtureControl){{generatePublicOption}})]
-
-            public static class Usage
-            {
-                public static FixtureControl SetValue() => new FixtureControl().Value(42);
-            }
-            """;
-        var result = RunGenerator(CreateCompilation("ExternalAssemblyTarget_" + generatePublicExtensions, consumerSource, controlLibraryReference));
-
-        AssertNoErrors(result.OutputCompilation);
-        Assert.Contains(result.GeneratedSources, source => source.Contains(
-            $"{(generatePublicExtensions ? "public" : "internal")} static partial class {FixtureNamespace}_FixtureControl_MarkupExtensions",
-            StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public void Referenced_internal_extensions_do_not_suppress_local_generation()
-    {
-        var internalLibrary = RunGenerator(CreateCompilation(
-            "InternalAvaloniaExtensionsLibrary",
-            CreateSource("[assembly: GenerateMarkupExtensionsForAvalonia]", "")));
-        AssertNoErrors(internalLibrary.OutputCompilation);
-        var internalLibraryReference = EmitReference(internalLibrary.OutputCompilation);
-        var consumerSource = CreateSource(string.Empty, """
-            public static class Usage
-            {
-                public static Button SetWidth() => new Button().Width(240);
-            }
-            """);
-        var consumer = RunGenerator(CreateCompilation("InternalExtensionsConsumer", consumerSource, internalLibraryReference));
+            first,
+            second));
 
         AssertNoErrors(consumer.OutputCompilation);
-        Assert.Contains(consumer.GeneratedSources, source => source.Contains(
-            "internal static partial class Avalonia_Controls_Button_MarkupExtensions",
-            StringComparison.Ordinal));
+        Assert.Contains(consumer.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN006");
+        Assert.Contains(consumer.GeneratedSources, static source =>
+            source.Contains("AmbiguousOne_SharedName_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains(consumer.GeneratedSources, static source =>
+            source.Contains("AmbiguousTwo_SharedName_MarkupExtensions", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void Public_generated_extensions_disable_missing_documentation_warnings()
+    public void Generated_extensions_copy_xml_documentation_from_metadata_and_source()
     {
-        var source = CreateSource(
-            "[assembly: GenerateMarkupExtensionsForAvalonia(generatePublicExtensions: true)]",
-            "");
-        var compilation = CreateCompilation(
-            "DocumentedPublicExtensions",
-            source,
-            compilationOptions: new CSharpCompilationOptions(
-                OutputKind.DynamicallyLinkedLibrary,
-                generalDiagnosticOption: ReportDiagnostic.Error,
-                nullableContextOptions: NullableContextOptions.Enable)
-                .WithSpecificDiagnosticOptions(ImmutableDictionary<string, ReportDiagnostic>.Empty
-                    .Add("CS1701", ReportDiagnostic.Suppress)));
-        var result = RunGenerator(compilation);
+        var result = RunGenerator(CreateCompilation("GeneratedDocumentation", CreateSource(string.Empty, """
+            public static class Usage
+            {
+                public static Button SetWidth() => new Button().Width(120);
+            }
+            """)));
 
-        using var assemblyStream = new MemoryStream();
-        using var documentationStream = new MemoryStream();
-        var emitResult = result.OutputCompilation.Emit(
-            assemblyStream,
-            xmlDocumentationStream: documentationStream,
+        AssertNoErrors(result.OutputCompilation);
+
+        // Avalonia's Button.ClickMode property is documented in the assembly's XML file.
+        var buttonExtensions = Assert.Single(result.GeneratedSources, static source =>
+            source.Contains("internal static partial class Avalonia_Controls_Button_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains("/// <summary>", buttonExtensions, StringComparison.Ordinal);
+        Assert.Contains("should react to clicks", buttonExtensions, StringComparison.Ordinal);
+
+        // The local fixture property is documented in source.
+        var fixtureExtensions = Assert.Single(result.GeneratedSources, static source =>
+            source.Contains($"internal static partial class {FixtureNamespace}_FixtureControl_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains("/// <summary>The fixture control value.</summary>", fixtureExtensions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Ignore_metadata_suppresses_a_used_control()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            [SVCSystemsCSharpUIGeneratorMetadata(Ignore = true)]
+            public sealed class IgnoredControl : Control
+            {
+                public static readonly StyledProperty<int> ValueProperty =
+                    AvaloniaProperty.Register<IgnoredControl, int>(nameof(Value));
+
+                public int Value
+                {
+                    get => GetValue(ValueProperty);
+                    set => SetValue(ValueProperty, value);
+                }
+            }
+
+            public static class Usage
+            {
+                public static IgnoredControl Create() => new IgnoredControl();
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("IgnoredControl", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.DoesNotContain(result.GeneratedSources, static source =>
+            source.Contains("IgnoredControl_MarkupExtensions", StringComparison.Ordinal));
+        var factories = Assert.Single(result.GeneratedSources, static source =>
+            source.Contains("internal static class GeneratedControlFactories", StringComparison.Ordinal));
+        Assert.DoesNotContain(" IgnoredControl(", factories, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Factories_and_registrations_follow_the_generated_set()
+    {
+        var result = RunGenerator(CreateCompilation("FactoryScope", CreateSource(string.Empty, """
+            public static class Usage
+            {
+                public static Button Create() => new Button();
+            }
+            """)));
+
+        AssertNoErrors(result.OutputCompilation);
+        var factories = Assert.Single(result.GeneratedSources, static source =>
+            source.Contains("internal static class GeneratedControlFactories", StringComparison.Ordinal));
+        Assert.Contains(" Button(", factories, StringComparison.Ordinal);
+        Assert.DoesNotContain(" DatePicker(", factories, StringComparison.Ordinal);
+        Assert.Contains(result.GeneratedSources, static source =>
+            source.Contains($"{FixtureNamespace}_FixtureControl_ViewFactoryRegistration", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.GeneratedSources, static source =>
+            source.Contains("DatePicker_ViewFactoryRegistration", StringComparison.Ordinal));
+    }
+
+    private static PortableExecutableReference CreateExternalWidgetLibrary() =>
+        EmitReference(CreateCompilation("ExternalWidgetLibrary", """
+            using Avalonia;
+            using Avalonia.Controls;
+
+            namespace ExternalWidgetFixture;
+
+            public sealed class ExternalWidget : Control
+            {
+                public static readonly StyledProperty<int> ValueProperty =
+                    AvaloniaProperty.Register<ExternalWidget, int>(nameof(Value));
+
+                public int Value
+                {
+                    get => GetValue(ValueProperty);
+                    set => SetValue(ValueProperty, value);
+                }
+            }
+            """));
+
+    [Fact]
+    public void Custom_control_library_is_discovered_without_attributes()
+    {
+        var library = CreateExternalWidgetLibrary();
+        var consumer = RunGenerator(CreateCompilationWithReferences("ExternalWidgetConsumer", """
+            using ExternalWidgetFixture;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static ExternalWidget Create() => new ExternalWidget().Value(1);
+            }
+            """, library));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        Assert.Contains(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class ExternalWidgetFixture_ExternalWidget_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Assembly_attribute_is_a_per_type_opt_in_for_unmentioned_controls()
+    {
+        var library = CreateExternalWidgetLibrary();
+        var consumer = RunGenerator(CreateCompilationWithReferences("PerTypeOptIn", """
+            using SVCSystems.Avalonia.CSharpUI;
+
+            [assembly: GenerateMarkupControl(typeof(ExternalWidgetFixture.ExternalWidget))]
+            """, library));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        Assert.Contains(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class ExternalWidgetFixture_ExternalWidget_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void User_alias_prevents_generated_alias_and_reports_SVCUIGEN007()
+    {
+        const string source = """
+            using Button = System.Text.StringBuilder;
+
+            public static class Usage
+            {
+                public static Button CreateAlias() => new Button();
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("UserAlias", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        var diagnostic = Assert.Single(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
+        Assert.Contains("Button", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("using alias", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(result.GeneratedSources, static generated =>
+            generated.Contains("global using Button =", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Multiple_types_for_a_factory_name_report_SVCUIGEN007()
+    {
+        const string source = """
+            using Avalonia.Controls;
+
+            namespace A { public class Shared { } }
+            namespace B { public class Shared { } }
+            namespace MyControls { public sealed class Shared : Control { } }
+
+            public static class Usage
+            {
+                public static object M() => new { X = new A.Shared(), Y = new B.Shared() };
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("MultipleTypeNames", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        var diagnostic = Assert.Single(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
+        Assert.Contains("Shared", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.Contains("more than one type", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generated_files_disappear_when_usage_is_removed()
+    {
+        var library = CreateExternalWidgetLibrary();
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var compilation = CreateCompilationWithReferences("StaleGeneration", """
+            using ExternalWidgetFixture;
+
+            public static class Usage
+            {
+                public static ExternalWidget Create() => new ExternalWidget();
+            }
+            """, library);
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(
+            [new ExternalAssemblyExtensionsGenerator().AsSourceGenerator()],
+            parseOptions: parseOptions);
+
+        driver = driver.RunGenerators(compilation, TestContext.Current.CancellationToken);
+        Assert.Contains(
+            driver.GetRunResult().Results.Single().GeneratedSources,
+            static generated => generated.SourceText.ToString().Contains(
+                "ExternalWidgetFixture_ExternalWidget_MarkupExtensions", StringComparison.Ordinal));
+
+        var withoutUsage = CSharpSyntaxTree.ParseText(
+            "public static class Usage { }",
+            parseOptions,
             cancellationToken: TestContext.Current.CancellationToken);
+        compilation = compilation.ReplaceSyntaxTree(compilation.SyntaxTrees.Single(), withoutUsage);
+        driver = driver.RunGenerators(compilation, TestContext.Current.CancellationToken);
 
-        Assert.Contains(result.GeneratedSources, generated => generated.Contains("#pragma warning disable CS1591", StringComparison.Ordinal));
-        Assert.True(emitResult.Success, string.Join(Environment.NewLine, emitResult.Diagnostics));
+        Assert.DoesNotContain(
+            driver.GetRunResult().Results.Single().GeneratedSources,
+            static generated => generated.SourceText.ToString().Contains(
+                "ExternalWidgetFixture_ExternalWidget_MarkupExtensions", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void Generation_attribute_constructors_preserve_options()
+    public void Global_factory_import_is_generated_with_type_aliases()
     {
-        var constructor = typeof(GenerateMarkupExtensionsForAssemblyAttribute).GetConstructor([typeof(Type)]);
-        var internalAttribute = new GenerateMarkupExtensionsForAssemblyAttribute(typeof(Control));
-        var publicAttribute = new GenerateMarkupExtensionsForAssemblyAttribute(typeof(Control), generatePublicExtensions: true);
-        var avaloniaAttribute = new GenerateMarkupExtensionsForAvaloniaAttribute(generatePublicExtensions: true);
+        const string source = """
+            using System.IO;
+            using Avalonia.Controls;
 
-        Assert.NotNull(constructor);
-        Assert.False(internalAttribute.GeneratePublicExtensions);
-        Assert.True(publicAttribute.GeneratePublicExtensions);
-        Assert.True(avaloniaAttribute.GeneratePublicExtensions);
+            public static class Usage
+            {
+                public static string Combine() => Path.Combine("a", "b");
+                public static Button Create() => new Button();
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("GlobalFactoryImport", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, generated =>
+            generated.Contains("global using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;", StringComparison.Ordinal));
+        Assert.Contains(result.GeneratedSources, generated =>
+            generated.Contains("global using Path = global::System.IO.Path;", StringComparison.Ordinal));
+        Assert.Contains(result.GeneratedSources, generated =>
+            generated.Contains("global using Button = global::Avalonia.Controls.Button;", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Comment_only_edit_keeps_generated_sources_stable_on_one_driver()
+    {
+        const string source = """
+            public static class Usage
+            {
+                public static Button SetWidth() => new Button().Width(120);
+            }
+            """;
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var compilation = CreateCompilation("IncrementalOne", source);
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(
+            [new ExternalAssemblyExtensionsGenerator().AsSourceGenerator()],
+            parseOptions: parseOptions,
+            driverOptions: new GeneratorDriverOptions(trackIncrementalGeneratorSteps: true));
+
+        driver = driver.RunGenerators(compilation, TestContext.Current.CancellationToken);
+        var firstResult = driver.GetRunResult().Results.Single();
+
+        // A comment-only edit must not invalidate the cached usage-name inputs.
+        var editedTree = CSharpSyntaxTree.ParseText(
+            "// unrelated edit\n" + source,
+            parseOptions,
+            cancellationToken: TestContext.Current.CancellationToken);
+        compilation = compilation.ReplaceSyntaxTree(compilation.SyntaxTrees.Single(), editedTree);
+        driver = driver.RunGenerators(compilation, TestContext.Current.CancellationToken);
+        var secondResult = driver.GetRunResult().Results.Single();
+
+        Assert.Equal(
+            firstResult.GeneratedSources.Select(static generated => generated.SourceText.ToString()),
+            secondResult.GeneratedSources.Select(static generated => generated.SourceText.ToString()));
+
+        // The same driver was reused across a real syntax-tree replacement, so the second result
+        // came from the incremental pipeline rather than a fresh generator run.
+        Assert.True(secondResult.TrackedSteps.ContainsKey("SourceOutput"));
+        Assert.NotEmpty(secondResult.GeneratedSources);
     }
 
     private static GeneratorResult RunGenerator(CSharpCompilation compilation)
@@ -514,15 +624,6 @@ public class MarkupExtensionGenerationTests
             (CSharpCompilation)outputCompilation,
             generatedSources,
             driverDiagnostics);
-    }
-
-    private static PortableExecutableReference CreatePublicAvaloniaExtensionsReference(string assemblyName)
-    {
-        var libraryResult = RunGenerator(CreateCompilation(
-            assemblyName,
-            CreateSource("[assembly: GenerateMarkupExtensionsForAvalonia(generatePublicExtensions: true)]", "")));
-        AssertNoErrors(libraryResult.OutputCompilation);
-        return EmitReference(libraryResult.OutputCompilation);
     }
 
     private static PortableExecutableReference EmitReference(CSharpCompilation compilation)
@@ -560,6 +661,14 @@ public class MarkupExtensionGenerationTests
             PlatformReferences.AddRange(additionalReferences),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
 
+    private static MetadataReference CreateReference(string path)
+    {
+        var xmlPath = Path.ChangeExtension(path, ".xml");
+        return MetadataReference.CreateFromFile(
+            path,
+            documentation: File.Exists(xmlPath) ? XmlDocumentationProvider.CreateFromFile(xmlPath) : null);
+    }
+
     private static ImmutableArray<MetadataReference> CreatePlatformReferences()
     {
         var frameworkVersion = Version.Parse(AppContext.TargetFrameworkName![(AppContext.TargetFrameworkName!.LastIndexOf('v') + 1)..]);
@@ -572,13 +681,25 @@ public class MarkupExtensionGenerationTests
             ?? throw new InvalidOperationException($"No .NET {frameworkVersion.Major} reference pack was found under '{referencePacksDirectory}'.");
         var frameworkReferences = Directory.EnumerateFiles(
                 Path.Combine(referencePack, "ref", $"net{frameworkVersion.Major}.0"), "*.dll")
-            .Select(static path => MetadataReference.CreateFromFile(path));
+            .Select(static path => CreateReference(path));
+
+        // Use the reference assemblies from the NuGet cache: their XML documentation files sit
+        // next to them, which lets in-memory generator tests exercise documented metadata symbols.
+        var version = typeof(Control).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!
+            .InformationalVersion.Split('+')[0];
+        var avaloniaRefRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".nuget", "packages", "avalonia", version, "ref");
+        var avaloniaRefDirectory = new[] { $"net{frameworkVersion.Major}.0", "net10.0", "net8.0" }
+            .Select(tfm => Path.Combine(avaloniaRefRoot, tfm))
+            .First(Directory.Exists);
 
         return [
             .. frameworkReferences,
-            MetadataReference.CreateFromFile(typeof(Control).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(AvaloniaProperty).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(GenerateMarkupExtensionsForAvaloniaAttribute).Assembly.Location)
+            CreateReference(Path.Combine(avaloniaRefDirectory, "Avalonia.Controls.dll")),
+            CreateReference(Path.Combine(avaloniaRefDirectory, "Avalonia.Base.dll")),
+            CreateReference(typeof(ViewBase).Assembly.Location)
         ];
     }
 
@@ -623,13 +744,14 @@ public class MarkupExtensionGenerationTests
 
     private static void AssertNoErrors(CSharpCompilation compilation)
     {
-        var errors = compilation.GetDiagnostics().Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var errors = compilation.GetDiagnostics(TestContext.Current.CancellationToken)
+            .Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
+            .ToArray();
         Assert.Empty(errors);
     }
 
-    private sealed record GeneratorResult(
+    private readonly record struct GeneratorResult(
         CSharpCompilation OutputCompilation,
         ImmutableArray<string> GeneratedSources,
         ImmutableArray<Diagnostic> Diagnostics);
 }
-

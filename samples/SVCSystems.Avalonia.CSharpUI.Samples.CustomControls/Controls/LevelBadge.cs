@@ -3,6 +3,9 @@ using Avalonia.Controls;
 
 namespace SVCSystems.Avalonia.CSharpUI.Samples.CustomControls.Controls;
 
+/// <summary>
+/// Example of a badge control with different levels of importance.
+/// </summary>
 public sealed class LevelBadge : ContentControl
 {
     public static readonly StyledProperty<BadgeLevel> LevelProperty =
@@ -11,6 +14,9 @@ public sealed class LevelBadge : ContentControl
     public static readonly AttachedProperty<bool> EmphasizedProperty =
         AvaloniaProperty.RegisterAttached<LevelBadge, Control, bool>("Emphasized");
 
+    /// <summary>
+    /// Gets or sets the level of importance for the badge.
+    /// </summary>
     [SVCSystemsCSharpUIGeneratorMetadata(Alias = "Importance")]
     public BadgeLevel Level
     {

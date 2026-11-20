@@ -7,17 +7,17 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
 
 internal sealed class ExtensionGroupGenerator(
     string groupName,
-    Func<ControlModel, IEnumerable<IMemberExtensionInfo>> membersQuery,
+    Func<ControlModel, Compilation?, IEnumerable<IMemberExtensionInfo>> membersQuery,
     params ExtensionGeneratorBase[] generators)
 {
     public string GroupName { get; } = groupName;
 
-    public string? Generate(ControlModel controlModel, out int generationsCount)
+    public string? Generate(ControlModel controlModel, Compilation? compilation, out int generationsCount)
     {
         generationsCount = 0;
 
         var sb = new StringBuilder(1024);
-        foreach (var extensionInfo in membersQuery(controlModel))
+        foreach (var extensionInfo in membersQuery(controlModel, compilation))
         {
             sb.AppendLine($" // {extensionInfo.MemberName}");
             foreach (var generator in generators)

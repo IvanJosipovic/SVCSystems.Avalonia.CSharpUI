@@ -12,7 +12,11 @@ internal static class ControlModelBuilder
         return Build(type, generatedAssembly, cache);
     }
 
-    private static ControlModel Build(
+    /// <summary>
+    /// Builds a model reusing an existing cache. Used by the usage-driven generator so the same
+    /// base-chain models are built once per compilation instead of once per used control.
+    /// </summary>
+    internal static ControlModel Build(
         INamedTypeSymbol type,
         IAssemblySymbol? generatedAssembly,
         Dictionary<INamedTypeSymbol, ControlModel> cache)
@@ -54,22 +58,6 @@ internal static class ControlModelBuilder
                 constructor,
                 IsAccessibleFromGeneratedCode(constructor, generatedAssembly)))
             .ToArray();
-        var contentSlotNames = new HashSet<string>(
-            declaredProperties
-                .Where(static property => property.IsContentSlot && property.ClrProperty is not null)
-                .Select(static property => property.Name),
-            StringComparer.Ordinal);
-        var declaredContentSlots = type.GetMembers()
-            .OfType<IPropertySymbol>()
-            .Where(static property => property.DeclaredAccessibility == Accessibility.Public)
-            .Where(property => contentSlotNames.Contains(property.Name))
-            .Select(static property => new ContentSlotModel(property))
-            .ToArray();
-        var contentSlots = declaredContentSlots
-            .Concat(baseType?.ContentSlots ?? [])
-            .GroupBy(static contentSlot => contentSlot.Name, StringComparer.Ordinal)
-            .Select(static group => group.First())
-            .ToArray();
         var typeMetadata = GetMetadata(type);
 
         var model = new ControlModel(
@@ -83,7 +71,6 @@ internal static class ControlModelBuilder
             declaredAttachedProperties,
             attachedProperties,
             stylePropertyFields,
-            contentSlots,
             typeMetadata.Ignore,
             typeMetadata.GenerateFactory,
             typeMetadata.Alias ?? type.Name);
@@ -215,8 +202,7 @@ internal static class ControlModelBuilder
                 property.Type,
                 inheritanceKind,
                 avaloniaField is null ? AvaloniaPropertyOwnershipKind.Registered : GetOwnershipKind(avaloniaField),
-                propertyMetadata.Ignore || fieldMetadata.Ignore,
-                propertyMetadata.Content || fieldMetadata.Content || HasContentAttribute(property));
+                propertyMetadata.Ignore || fieldMetadata.Ignore);
         }
 
         foreach (var field in type.GetMembers().OfType<IFieldSymbol>()
@@ -236,8 +222,7 @@ internal static class ControlModelBuilder
                         field.Type.GetLastGenericArgument(),
                         existing.InheritanceKind,
                         GetOwnershipKind(field),
-                        existing.IsIgnored || GetMetadata(field).Ignore,
-                        existing.IsContentSlot || GetMetadata(field).Content);
+                        existing.IsIgnored || GetMetadata(field).Ignore);
                 }
 
                 continue;
@@ -258,8 +243,7 @@ internal static class ControlModelBuilder
                         ? PropertyInheritanceKind.Inherited
                         : PropertyInheritanceKind.Shadow,
                 ownershipKind,
-                GetMetadata(field).Ignore,
-                GetMetadata(field).Content);
+                GetMetadata(field).Ignore);
         }
 
         return declared.Values.ToArray();
@@ -306,10 +290,6 @@ internal static class ControlModelBuilder
         return fields.Where(static field => field.IsAcceptableStyledField()).ToArray();
     }
 
-    private static bool HasContentAttribute(IPropertySymbol property) =>
-        property.GetAttributes().Any(static attribute =>
-            attribute.AttributeClass?.ToDisplayString() is "Avalonia.Metadata.ContentAttribute" or "Avalonia.Metadata.ContentPropertyAttribute");
-
     internal static GeneratorMetadata GetMetadata(ISymbol symbol)
     {
         foreach (var attribute in symbol.GetAttributes())
@@ -321,7 +301,6 @@ internal static class ControlModelBuilder
 
             var ignore = false;
             var generateFactory = true;
-            var content = false;
             string? alias = null;
             foreach (var argument in attribute.NamedArguments)
             {
@@ -333,19 +312,16 @@ internal static class ControlModelBuilder
                     case "GenerateFactory" when argument.Value.Value is bool factoryValue:
                         generateFactory = factoryValue;
                         break;
-                    case "Content" when argument.Value.Value is bool contentValue:
-                        content = contentValue;
-                        break;
                     case "Alias" when argument.Value.Value is string aliasValue:
                         alias = aliasValue;
                         break;
                 }
             }
 
-            return new GeneratorMetadata(ignore, generateFactory, content, alias);
+            return new GeneratorMetadata(ignore, generateFactory, alias);
         }
 
-        return new GeneratorMetadata(false, true, false, null);
+        return new GeneratorMetadata(false, true, null);
     }
 
     private static PropertyInheritanceKind GetInheritanceKind(bool isOverride, bool hidesBaseProperty) =>
@@ -387,13 +363,11 @@ internal static class ControlModelBuilder
     }
 }
 
-internal readonly struct GeneratorMetadata(bool ignore, bool generateFactory, bool content, string? alias)
+internal readonly struct GeneratorMetadata(bool ignore, bool generateFactory, string? alias)
 {
     internal bool Ignore { get; } = ignore;
 
     internal bool GenerateFactory { get; } = generateFactory;
-
-    internal bool Content { get; } = content;
 
     internal string? Alias { get; } = alias;
 }

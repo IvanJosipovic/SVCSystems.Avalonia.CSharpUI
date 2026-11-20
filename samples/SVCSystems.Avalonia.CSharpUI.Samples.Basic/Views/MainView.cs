@@ -1,12 +1,10 @@
-using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;
-
 namespace SVCSystems.Avalonia.CSharpUI.Samples.Basic.Views;
 
 public sealed class MainView : ViewBase
 {
     protected override object Build() =>
         StackPanel()
-            .Margin(new Thickness(24))
+            .Margin(24)
             .Spacing(12)
             .Children([
                 TextBlock()

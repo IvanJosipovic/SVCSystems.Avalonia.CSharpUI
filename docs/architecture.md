@@ -6,27 +6,25 @@ The source generator reads Avalonia symbols into a `ControlModel` before emittin
 
 ## Generated APIs
 
-Fluent property setters call the original CLR property or Avalonia property. Expression binding helpers build Avalonia compiled bindings. Event helpers subscribe to the original .NET or routed event. The generated methods are conveniences over Avalonia's types and behavior.
+Fluent property setters call the original CLR property or Avalonia property. Expression binding helpers build Avalonia compiled bindings. Event helpers subscribe to the original .NET or routed event. The generated methods are conveniences over Avalonia's types and behavior, and carry XML documentation copied from the underlying CLR property/event (or from the control type for factories). Documentation for referenced controls is read from the `.xml` file shipped beside the reference assembly, because the compiler host does not attach it to metadata symbols.
 
 Generated control factories return the actual control type and attach source metadata:
 
 ```csharp
-using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;
-
 var button = Button().Content("Save");
 ```
 
+`Button()` works in any source file. The generator emits a global static import of `GeneratedControlFactories` and global aliases for names that are also used as types (for example `Path = System.IO.Path` and `Grid = Avalonia.Controls.Grid`), so factory calls never shadow normal type usage.
+
 `SourceInfo.Get(control)` returns the source file, line, runtime control type, and owning `ViewBase` type when the factory ran during view construction. The metadata is stored separately from the control and does not affect Avalonia property or binding behavior.
 
-## External controls
+## Usage-driven generation
 
-Controls declared in the current project are analyzed automatically. To generate extensions for controls in another assembly, add an assembly attribute that names a type from that assembly:
+Extensions, control factories and `ViewFactory` registrations are generated only for controls that the application uses. Usage is detected from source: factory calls (`Button()`), object creation (`new Button()`), type references, `typeof`, generic arguments and base lists. Controls declared in the current project are always included. The resolved set is then closed over base types, because fluent setters are emitted on the type that declares the Avalonia property — `Button().Margin(...)` needs `Layoutable` in the set.
 
-```csharp
-[assembly: GenerateMarkupExtensionsForAssembly(typeof(MyControl))]
-```
+A curated set of common Avalonia controls is generated unconditionally. This list is declared with `typeof(...)` in `[assembly: GenerateMarkupControl(...)]` in the runtime library, so it is compile-time checked; the generator reads it from metadata. The same assembly attribute can be applied in an application as a narrow per-type opt-in, for example to generate extensions for a control used only from compiled XAML in a referenced library.
 
-The generated methods are internal by default. Set `generatePublicExtensions: true` to publish them for consumers. If more than one referenced assembly publishes the same Avalonia extension provider, diagnostic `SVCUIGEN001` reports the conflict. If control analysis or emission fails, `SVCUIGEN003` reports the control and error at compile time.
+Generated methods are `internal` to the consuming compilation. If control analysis or emission fails, `SVCUIGEN003` reports the control and error at compile time. When a name matches more than one control type, `SVCUIGEN006` reports the ambiguity and all candidates are generated. When a factory name cannot be given a type alias, `SVCUIGEN007` warns that type usages with that name should be namespace-qualified. See [the usage-driven design](usage-driven-generation.md) for details.
 
 ## Generator metadata
 
@@ -35,7 +33,6 @@ The generated methods are internal by default. Set `generatePublicExtensions: tr
 - `Ignore = true` suppresses generated APIs for a control or member.
 - `Alias = "Caption"` changes a generated factory or fluent method name.
 - `GenerateFactory = false` omits a control factory and its `ViewFactory` registration.
-- `Content = true` marks a property as a content slot for generator tooling.
 
 The attribute does not rename Avalonia properties, events, or CLR members.
 

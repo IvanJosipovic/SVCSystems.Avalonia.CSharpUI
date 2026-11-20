@@ -1,12 +1,9 @@
 using SVCSystems.Avalonia.CSharpUI.Samples.Mvvm.ViewModels;
 using SVCSystems.Avalonia.CSharpUI.Samples.Mvvm.Views;
 
-[assembly: GenerateMarkupExtensionsForAvalonia]
-
 var lifetime = new ClassicDesktopStyleApplicationLifetime
 {
-    Args = args,
-    ShutdownMode = ShutdownMode.OnLastWindowClose
+    Args = args
 };
 
 var appBuilder = AppBuilder.Configure<Application>()
