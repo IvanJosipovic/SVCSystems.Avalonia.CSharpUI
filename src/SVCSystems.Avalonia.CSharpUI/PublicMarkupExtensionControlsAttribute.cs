@@ -9,7 +9,9 @@ namespace SVCSystems.Avalonia.CSharpUI;
 /// <remarks>
 /// The source generator emits this assembly attribute into publishing assemblies. Consumers read
 /// it from their references so they can skip generating duplicate extensions for the same
-/// controls. Each entry is a <c>TypeKey</c> of the form <c>AssemblyName|Namespace.Type</c>.
+/// controls. Each entry is <c>Publisher::AssemblyName|Namespace.Type</c>, where the prefix identifies
+/// the assembly that originally publishes the extensions so propagated coverage is not mistaken
+/// for two independent publishers.
 /// </remarks>
 [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = false, Inherited = false)]
 public sealed class PublicMarkupExtensionControlsAttribute : Attribute

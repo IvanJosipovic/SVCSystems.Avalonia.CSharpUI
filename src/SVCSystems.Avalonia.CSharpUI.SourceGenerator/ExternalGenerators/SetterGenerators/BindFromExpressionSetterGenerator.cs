@@ -4,6 +4,8 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.Setter
 
 internal sealed class BindFromExpressionSetterGenerator : ExtensionGeneratorBase<PropertyExtensionInfo>
 {
+    internal override bool OverlapsWithDeclarativeGenerators => true;
+
     protected override string GetExtension(PropertyExtensionInfo info)
     {
         var genericParams = info.IsGeneric ? "<T, TViewModel, TValue>" : "<TViewModel, TValue>";

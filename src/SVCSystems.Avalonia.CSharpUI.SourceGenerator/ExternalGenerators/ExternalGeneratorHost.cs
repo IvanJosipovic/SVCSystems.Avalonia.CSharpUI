@@ -89,14 +89,14 @@ internal sealed class ExternalGeneratorHost
         INamedTypeSymbol controlType,
         Compilation? compilation = null,
         bool publish = false,
-        ISet<Type>? suppressedGenerators = null)
-        => GenerateExtensions(ControlModelBuilder.Build(controlType), compilation, publish, suppressedGenerators);
+        bool suppressOverlappingSetters = false)
+        => GenerateExtensions(ControlModelBuilder.Build(controlType), compilation, publish, suppressOverlappingSetters);
 
     internal string? GenerateExtensions(
         ControlModel controlModel,
         Compilation? compilation = null,
         bool publish = false,
-        ISet<Type>? suppressedGenerators = null)
+        bool suppressOverlappingSetters = false)
     {
         if (controlModel.IgnoreGeneratedExtensions)
         {
@@ -107,11 +107,7 @@ internal sealed class ExternalGeneratorHost
 
         foreach (var groupGenerator in _groupGenerators)
         {
-            var extensions = groupGenerator.Generate(
-                controlModel,
-                compilation,
-                out var generatedCount,
-                suppressedGenerators);
+            var extensions = groupGenerator.Generate(controlModel, compilation, suppressOverlappingSetters, out var generatedCount);
             if (generatedCount == 0 || string.IsNullOrWhiteSpace(extensions))
             {
                 continue;
@@ -159,12 +155,22 @@ internal sealed class ExternalGeneratorHost
     }
 
     /// <summary>
-    /// A published extension class must not expose less accessible control types in its public
-    /// signatures, so only controls that are visible outside the assembly can be published.
+    /// A published extension class must not expose less accessible types in its public signatures.
+    /// A control is publishable only when its whole type is visible outside the assembly: the type
+    /// itself, its containing types and every type argument (including array/pointer elements).
     /// </summary>
-    internal static bool CanPublish(INamedTypeSymbol type) =>
-        type.DeclaredAccessibility == Accessibility.Public &&
-        (type.ContainingType is null || CanPublish(type.ContainingType));
+    internal static bool CanPublish(INamedTypeSymbol type) => IsPubliclyAccessible(type);
 
-    private static bool IsPubliclyAccessible(INamedTypeSymbol type) => CanPublish(type);
+    private static bool IsPubliclyAccessible(ITypeSymbol type) => type switch
+    {
+        IArrayTypeSymbol array => IsPubliclyAccessible(array.ElementType),
+        IPointerTypeSymbol pointer => IsPubliclyAccessible(pointer.PointedAtType),
+        // An open generic's parameter is part of the public definition, not an inaccessible type.
+        ITypeParameterSymbol => true,
+        INamedTypeSymbol named =>
+            named.DeclaredAccessibility == Accessibility.Public &&
+            (named.ContainingType is null || IsPubliclyAccessible(named.ContainingType)) &&
+            named.TypeArguments.All(IsPubliclyAccessible),
+        _ => false
+    };
 }

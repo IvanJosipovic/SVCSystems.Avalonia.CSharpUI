@@ -15,8 +15,8 @@ internal sealed class ExtensionGroupGenerator(
     public string? Generate(
         ControlModel controlModel,
         Compilation? compilation,
-        out int generationsCount,
-        ISet<Type>? suppressedGenerators = null)
+        bool suppressOverlappingSetters,
+        out int generationsCount)
     {
         generationsCount = 0;
 
@@ -26,7 +26,7 @@ internal sealed class ExtensionGroupGenerator(
             sb.AppendLine($" // {extensionInfo.MemberName}");
             foreach (var generator in generators)
             {
-                if (suppressedGenerators?.Contains(generator.GetType()) == true)
+                if (suppressOverlappingSetters && generator.OverlapsWithDeclarativeGenerators)
                 {
                     continue;
                 }
