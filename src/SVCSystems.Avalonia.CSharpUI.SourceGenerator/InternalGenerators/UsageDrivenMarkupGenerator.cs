@@ -130,6 +130,15 @@ public sealed class UsageDrivenMarkupGenerator
         isEnabledByDefault: true,
         description: "A factory name is also used as a type, but a global alias cannot be generated for it. Qualify type usages with their namespace.");
 
+    internal static readonly DiagnosticDescriptor OverlappingPublishers = new(
+        id: "SVCUIGEN008",
+        title: "Overlapping markup extension publishers",
+        messageFormat: "These controls are published by more than one independent assembly: {0}. Publish them from a single shared upstream library so consumers do not get ambiguous extension methods.",
+        category: "SVCSystems.Avalonia.CSharpUI",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        description: "Two referenced assemblies both publish public extensions for the same control. Remove one publisher or move the shared extensions to a single upstream library.");
+
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         var names = UsageNameProvider.Create(context).Collect();
@@ -178,17 +187,24 @@ public sealed class UsageDrivenMarkupGenerator
         var usage = UsageResolver.Resolve(catalog, names);
         var publishing = ExtensionPublishing.Read(compilation);
 
+        if (publishing.OverlappingPublisherKeys.Count > 0)
+        {
+            var overlappingKeys = publishing.OverlappingPublisherKeys
+                .OrderBy(static key => key, StringComparer.Ordinal);
+            diagnostics.Add(new GenerationDiagnostic(
+                "SVCUIGEN008",
+                string.Format(OverlappingPublishers.MessageFormat.ToString(), string.Join(", ", overlappingKeys)),
+                DiagnosticSeverity.Warning));
+        }
+
         // Controls whose extensions are already public in a referenced assembly are removed from
         // this compilation's local generation. That keeps friend assemblies from seeing duplicate
         // internal extension methods and avoids recompiling the same generated APIs in each project.
+        // RestrictedRoots only limits which controls are published; every uncovered control must
+        // still be generated locally so its setters remain available in this compilation.
         var extensionKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var key in usage.Keys)
         {
-            if (publishing.RestrictedRoots is not null && !publishing.RestrictedRoots.Contains(key))
-            {
-                continue;
-            }
-
             if (publishing.ReferencedCoverage.Contains(key.ToString()))
             {
                 continue;
@@ -207,7 +223,12 @@ public sealed class UsageDrivenMarkupGenerator
 
         var cache = new Dictionary<INamedTypeSymbol, ControlModel>(SymbolEqualityComparer.Default);
         var models = new List<ControlModel>();
-        var publishedKeys = new HashSet<string>(publishing.ReferencedCoverage, StringComparer.Ordinal);
+        var publishedKeys = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in publishing.CoverageOrigins)
+        {
+            publishedKeys[pair.Key] = pair.Value;
+        }
+
         foreach (var key in usage.Keys)
         {
             if (!catalog.TryGetByKey(key, out var symbol))
@@ -260,9 +281,21 @@ public sealed class UsageDrivenMarkupGenerator
                 continue;
             }
 
+            // AvaloniaPropertyExtensionsGenerator and AvaloniaEventExtensionsGenerator already emit
+            // public setters for declarative views. A second overload set here would be ambiguous
+            // both locally and for consumers, published or not. Factories and registrations below
+            // still use this model.
+            if (MarkupTypeHelpers.IsAvaloniaMarkupView(model.Type))
+            {
+                continue;
+            }
+
             try
             {
-                var publish = publishing.IsPublisher && ExternalGeneratorHost.CanPublish(model.Type);
+                var typeKey = TypeKey.Create(model.Type);
+                var publish = publishing.IsPublisher &&
+                    (publishing.RestrictedRoots is null || publishing.RestrictedRoots.Contains(typeKey)) &&
+                    ExternalGeneratorHost.CanPublish(model.Type);
                 var code = host.GenerateExtensions(model, compilation, publish);
                 if (string.IsNullOrWhiteSpace(code))
                 {
@@ -271,7 +304,7 @@ public sealed class UsageDrivenMarkupGenerator
 
                 if (publish)
                 {
-                    publishedKeys.Add(TypeKey.Create(model.Type).ToString());
+                    publishedKeys[typeKey.ToString()] = publishing.AssemblyName;
                 }
 
                 var typeName = model.Type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);

@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using Avalonia;
 using Avalonia.Controls;
 using SVCSystems.Avalonia.CSharpUI;
+using SVCSystems.Avalonia.CSharpUI.SourceGenerator;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -179,6 +180,197 @@ public class MarkupExtensionGenerationTests
             generated.Contains("PublicMarkupExtensionControlsAttribute", StringComparison.Ordinal));
         Assert.Contains("Avalonia.Controls.Button", coverage, StringComparison.Ordinal);
         Assert.DoesNotContain("Avalonia.Controls.TextBlock", coverage, StringComparison.Ordinal);
+
+        // Unselected controls must still be generated locally; the filter only limits publication.
+        Assert.Contains(result.GeneratedSources, generated =>
+            generated.Contains("internal static partial class Avalonia_Controls_TextBlock_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Inaccessible_generic_arguments_are_not_published()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            [assembly: GeneratePublicMarkupExtensions]
+
+            namespace GenericPublishFixture
+            {
+                internal sealed class InternalModel { }
+
+                public class GenericBase<T> : Control
+                {
+                    public static readonly StyledProperty<int> ValueProperty =
+                        AvaloniaProperty.Register<GenericBase<T>, int>(nameof(Value));
+
+                    public int Value
+                    {
+                        get => GetValue(ValueProperty);
+                        set => SetValue(ValueProperty, value);
+                    }
+                }
+
+                internal sealed class Derived : GenericBase<InternalModel> { }
+
+                public static class Usage
+                {
+                    public static object Create() => new Derived().Value(1);
+                }
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("GenericPublish", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        var coverage = Assert.Single(result.GeneratedSources, generated =>
+            generated.Contains("PublicMarkupExtensionControlsAttribute", StringComparison.Ordinal));
+        Assert.DoesNotContain("GenericBase", coverage, StringComparison.Ordinal);
+        Assert.Contains(result.GeneratedSources, generated =>
+            generated.Contains("internal static partial class GenericPublishFixture_GenericBase_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Declarative_views_keep_public_setters_from_the_property_generator_only()
+    {
+        const string publisherSource = """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            [assembly: GeneratePublicMarkupExtensions]
+
+            namespace DeclarativePublishFixture
+            {
+                public sealed class PublishedView : ViewBase
+                {
+                    public static readonly StyledProperty<int> ValueProperty =
+                        AvaloniaProperty.Register<PublishedView, int>(nameof(Value));
+
+                    public int Value
+                    {
+                        get => GetValue(ValueProperty);
+                        set => SetValue(ValueProperty, value);
+                    }
+
+                    protected override object Build() => new global::Avalonia.Controls.TextBlock();
+                }
+            }
+            """;
+        var publisher = RunGenerator(
+            CreateCompilation("DeclarativePublisher", publisherSource),
+            new Generator());
+        AssertNoErrors(publisher.OutputCompilation);
+
+        // The property generator already emits public setters for declarative views, so the
+        // usage-driven generator must publish only the other controls it generates.
+        Assert.DoesNotContain(publisher.GeneratedSources, generated =>
+            generated.Contains("public static partial class DeclarativePublishFixture_PublishedView_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains(publisher.GeneratedSources, generated =>
+            generated.Contains("public static partial class PublishedViewExtensions", StringComparison.Ordinal));
+        var coverage = Assert.Single(publisher.GeneratedSources, generated =>
+            generated.Contains("PublicMarkupExtensionControlsAttribute", StringComparison.Ordinal));
+        Assert.DoesNotContain("DeclarativePublishFixture.PublishedView", coverage, StringComparison.Ordinal);
+
+        const string consumerSource = """
+            using DeclarativePublishFixture;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public sealed class Vm
+            {
+                public string Name { get; set; } = "";
+            }
+
+            public static class Usage
+            {
+                public static PublishedView Create(Vm vm) => new PublishedView().Value(vm, x => x.Name);
+            }
+            """;
+        var consumer = RunGenerator(
+            CreateCompilationWithReferences(
+                "DeclarativeConsumer",
+                consumerSource,
+                EmitReference(publisher.OutputCompilation)),
+            new Generator());
+
+        AssertNoErrors(consumer.OutputCompilation);
+    }
+
+    [Fact]
+    public void Overlapping_publishers_report_SVCUIGEN008()
+    {
+        PortableExecutableReference CreatePublisher(string name) =>
+            EmitReference(RunGenerator(CreateCompilation(name, CreateSource(
+                "[assembly: SVCSystems.Avalonia.CSharpUI.GeneratePublicMarkupExtensions]",
+                """
+                public static class Usage
+                {
+                    public static Button Create() => new Button().Width(120);
+                }
+                """))).OutputCompilation);
+
+        var consumer = RunGenerator(CreateCompilationWithReferences(
+            "OverlapConsumer",
+            """
+            using Avalonia.Controls;
+
+            public static class Usage
+            {
+                public static Button Create() => new Button().Width(120);
+            }
+            """,
+            CreatePublisher("FirstPublisher"),
+            CreatePublisher("SecondPublisher")));
+
+        var diagnostic = Assert.Single(consumer.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN008");
+        Assert.Contains("Avalonia.Controls.Button", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Coverage_from_one_publisher_reached_through_two_references_is_not_an_overlap()
+    {
+        var publisher = RunGenerator(CreateCompilation("UpstreamPublisher", CreateSource(
+            "[assembly: SVCSystems.Avalonia.CSharpUI.GeneratePublicMarkupExtensions]",
+            """
+            public static class Usage
+            {
+                public static Button Create() => new Button().Width(120);
+            }
+            """)));
+        var upstream = EmitReference(publisher.OutputCompilation);
+
+        var propagator = RunGenerator(CreateCompilationWithReferences(
+            "PropagatingPublisher",
+            CreateSource("[assembly: SVCSystems.Avalonia.CSharpUI.GeneratePublicMarkupExtensions]", string.Empty),
+            upstream));
+        AssertNoErrors(propagator.OutputCompilation);
+
+        var consumer = RunGenerator(CreateCompilationWithReferences(
+            "PropagatedCoverageConsumer",
+            """
+            using Avalonia.Controls;
+
+            public static class Usage
+            {
+                public static Button Create() => new Button().Width(120);
+            }
+            """,
+            upstream,
+            EmitReference(propagator.OutputCompilation)));
+
+        Assert.DoesNotContain(consumer.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN008");
+    }
+
+    [Fact]
+    public void Publishing_attributes_expose_their_configuration()
+    {
+        Assert.Empty(new GeneratePublicMarkupExtensionsAttribute().Controls);
+
+        var filtered = new GeneratePublicMarkupExtensionsAttribute(typeof(Button), typeof(TextBox));
+        Assert.Equal([typeof(Button), typeof(TextBox)], filtered.Controls);
+
+        Assert.Empty(new PublicMarkupExtensionControlsAttribute().Controls);
+        Assert.Equal(["Assembly|Type"], new PublicMarkupExtensionControlsAttribute("Assembly|Type").Controls);
     }
 
     [Fact]
@@ -1056,11 +1248,13 @@ public class MarkupExtensionGenerationTests
         Assert.NotEmpty(secondResult.GeneratedSources);
     }
 
-    private static GeneratorResult RunGenerator(CSharpCompilation compilation)
+    private static GeneratorResult RunGenerator(
+        CSharpCompilation compilation,
+        IIncrementalGenerator? generator = null)
     {
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
         GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            [new ExternalAssemblyExtensionsGenerator().AsSourceGenerator()],
+            [(generator ?? new ExternalAssemblyExtensionsGenerator()).AsSourceGenerator()],
             parseOptions: parseOptions);
         driver = driver.RunGeneratorsAndUpdateCompilation(
             compilation,

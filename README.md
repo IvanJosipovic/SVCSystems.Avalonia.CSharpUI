@@ -58,7 +58,9 @@ Or restrict publication to specific controls and their base types:
 [assembly: GeneratePublicMarkupExtensions(typeof(Button), typeof(TextBox))]
 ```
 
-The generator emits a `PublicMarkupExtensionControlsAttribute` into the publishing assembly. Projects that reference it read that metadata and skip generation for the covered controls; they still generate their own factories and view registrations, and generate internal extensions for controls the publisher does not cover. Coverage is propagated through publisher chains, so a project that references a publisher inherits the controls published by the assemblies that publisher references. Publishing therefore removes duplicate extension methods between friend assemblies and avoids recompiling the same generated code in every project. Only publicly accessible controls can be published; internal controls keep internal extensions.
+The generator emits a `PublicMarkupExtensionControlsAttribute` into the publishing assembly. Projects that reference it read that metadata and skip generation for the covered controls; they still generate their own factories and view registrations, and generate internal extensions for controls the publisher does not cover. The control filter above limits only publication — unselected controls are still generated locally. Coverage is propagated through publisher chains, so a project that references a publisher inherits the controls published by the assemblies that publisher references. Publishing therefore removes duplicate extension methods between friend assemblies and avoids recompiling the same generated code in every project.
+
+Only publicly accessible controls can be published; internal controls and controls whose type arguments are not publicly accessible keep internal extensions. Declarative views (`ViewBase` subclasses) are never published here because their setters are already emitted as public APIs by the property and event generators. If two independent assemblies publish the same control, consumers report `SVCUIGEN008` and should move that control's extensions to a single shared upstream library.
 
 ## XAML-only library resources
 
