@@ -80,6 +80,33 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
+    public void Static_events_do_not_generate_instance_event_helpers()
+    {
+        const string source = """
+            using Avalonia.Controls;
+
+            namespace MarkupExtensionGeneratorFixture
+            {
+                public class StaticEventControl : Control
+                {
+                    public static event System.EventHandler? SharedEvent;
+                    public event System.EventHandler? InstanceEvent;
+                }
+            }
+            """;
+
+        var result = RunGenerator(CreateCompilation("StaticEventControl", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        var generated = Assert.Single(result.GeneratedSources, generated =>
+            generated.Contains(
+                "internal static partial class MarkupExtensionGeneratorFixture_StaticEventControl_MarkupExtensions",
+                StringComparison.Ordinal));
+        Assert.DoesNotContain("OnSharedEvent", generated, StringComparison.Ordinal);
+        Assert.Contains("OnInstanceEvent", generated, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Common_controls_are_generated_without_being_mentioned_in_source()
     {
         var result = RunGenerator(CreateCompilation("CommonControls", "using Avalonia.Controls;"));

@@ -261,7 +261,7 @@ internal static class ControlModelBuilder
         }
 
         return type.GetMembers().OfType<IEventSymbol>()
-            .Where(static eventSymbol => eventSymbol.DeclaredAccessibility == Accessibility.Public)
+            .Where(static eventSymbol => eventSymbol.DeclaredAccessibility == Accessibility.Public && !eventSymbol.IsStatic)
             .Select(eventSymbol =>
             {
                 var metadata = GetMetadata(eventSymbol);
