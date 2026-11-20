@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Text;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.Analysis;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
+using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.SetterGenerators;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
@@ -121,6 +122,15 @@ public sealed class UsageDrivenMarkupGenerator
         isEnabledByDefault: true,
         description: "A control name used in source matched more than one type. All matches were generated so code compiles regardless of which type was meant.");
 
+    // AvaloniaPropertyExtensionsGenerator emits these two overload families for local controls
+    // implementing IDeclarativeViewBase. Other generated helpers (BindingBase setters, style
+    // setters, events, attached properties) must still be emitted here.
+    private static readonly HashSet<Type> DeclarativeViewSuppressedGenerators =
+    [
+        typeof(ValueSetterGenerator),
+        typeof(BindFromExpressionSetterGenerator)
+    ];
+
     internal static readonly DiagnosticDescriptor UnaliasableFactoryName = new(
         id: "SVCUIGEN007",
         title: "Control factory name cannot be aliased",
@@ -176,6 +186,26 @@ public sealed class UsageDrivenMarkupGenerator
 
         var catalog = ControlCatalog.Build(compilation);
         var usage = UsageResolver.Resolve(catalog, names);
+        var publishing = ExtensionPublishing.Read(compilation);
+
+        // Controls whose extensions are already public in a referenced assembly are removed from
+        // this compilation's local generation. That keeps friend assemblies from seeing duplicate
+        // internal extension methods and avoids recompiling the same generated APIs in each project.
+        var extensionKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var key in usage.Keys)
+        {
+            if (publishing.RestrictedRoots is not null && !publishing.RestrictedRoots.Contains(key))
+            {
+                continue;
+            }
+
+            if (publishing.ReferencedCoverage.Contains(key.ToString()))
+            {
+                continue;
+            }
+
+            extensionKeys.Add(key.ToString());
+        }
 
         foreach (var ambiguousName in usage.AmbiguousNames)
         {
@@ -187,6 +217,7 @@ public sealed class UsageDrivenMarkupGenerator
 
         var cache = new Dictionary<INamedTypeSymbol, ControlModel>(SymbolEqualityComparer.Default);
         var models = new List<ControlModel>();
+        var publishedKeys = new HashSet<string>(publishing.ReferencedCoverage, StringComparer.Ordinal);
         foreach (var key in usage.Keys)
         {
             if (!catalog.TryGetByKey(key, out var symbol))
@@ -234,19 +265,30 @@ public sealed class UsageDrivenMarkupGenerator
         var host = new ExternalGeneratorHost();
         foreach (var model in models)
         {
-            // AvaloniaPropertyExtensionsGenerator emits setters for local controls that implement
-            // IDeclarativeViewBase. Emitting them here too produces duplicate extension methods.
-            if (MarkupTypeHelpers.IsAvaloniaMarkupView(model.Type))
+            if (!extensionKeys.Contains(TypeKey.Create(model.Type).ToString()))
             {
                 continue;
             }
 
+            ISet<Type>? suppressedGenerators = null;
+            if (SymbolEqualityComparer.Default.Equals(model.Type.ContainingAssembly, compilation.Assembly) &&
+                MarkupTypeHelpers.IsAvaloniaMarkupView(model.Type))
+            {
+                suppressedGenerators = DeclarativeViewSuppressedGenerators;
+            }
+
             try
             {
-                var code = host.GenerateExtensions(model, compilation);
+                var publish = publishing.IsPublisher && ExternalGeneratorHost.CanPublish(model.Type);
+                var code = host.GenerateExtensions(model, compilation, publish, suppressedGenerators);
                 if (string.IsNullOrWhiteSpace(code))
                 {
                     continue;
+                }
+
+                if (publish)
+                {
+                    publishedKeys.Add(TypeKey.Create(model.Type).ToString());
                 }
 
                 var typeName = model.Type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
@@ -266,6 +308,13 @@ public sealed class UsageDrivenMarkupGenerator
         GenerateFactoryUsings(sources, diagnostics, compilation, factoryTargets);
         GenerateFactories(sources, compilation, factoryTargets);
         GenerateRegistrations(sources, GetRegistrationTargets(models));
+
+        if (publishing.IsPublisher)
+        {
+            sources.Add(new GeneratedSource(
+                "PublicMarkupExtensionControls.g.cs",
+                ExtensionPublishing.CreateCoverageSource(publishedKeys)));
+        }
 
         return new GenerationResult(sources.ToImmutableArray(), diagnostics.ToImmutableArray());
     }

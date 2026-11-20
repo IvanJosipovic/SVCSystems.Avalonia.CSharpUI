@@ -85,10 +85,18 @@ internal sealed class ExternalGeneratorHost
                     ControlModelBuilder.GetMetadata(field).Alias,
                     compilation));
 
-    public string? GenerateExtensions(INamedTypeSymbol controlType, Compilation? compilation = null)
-        => GenerateExtensions(ControlModelBuilder.Build(controlType), compilation);
+    public string? GenerateExtensions(
+        INamedTypeSymbol controlType,
+        Compilation? compilation = null,
+        bool publish = false,
+        ISet<Type>? suppressedGenerators = null)
+        => GenerateExtensions(ControlModelBuilder.Build(controlType), compilation, publish, suppressedGenerators);
 
-    internal string? GenerateExtensions(ControlModel controlModel, Compilation? compilation = null)
+    internal string? GenerateExtensions(
+        ControlModel controlModel,
+        Compilation? compilation = null,
+        bool publish = false,
+        ISet<Type>? suppressedGenerators = null)
     {
         if (controlModel.IgnoreGeneratedExtensions)
         {
@@ -99,7 +107,11 @@ internal sealed class ExternalGeneratorHost
 
         foreach (var groupGenerator in _groupGenerators)
         {
-            var extensions = groupGenerator.Generate(controlModel, compilation, out var generatedCount);
+            var extensions = groupGenerator.Generate(
+                controlModel,
+                compilation,
+                out var generatedCount,
+                suppressedGenerators);
             if (generatedCount == 0 || string.IsNullOrWhiteSpace(extensions))
             {
                 continue;
@@ -132,7 +144,8 @@ internal sealed class ExternalGeneratorHost
         sb.AppendLine("/// </summary>");
         sb.AppendLine("[global::System.CodeDom.Compiler.GeneratedCode(\"SVCSystems.Avalonia.CSharpUI.SourceGenerator\", \"1.0.0.0\")]");
         sb.AppendLine("[global::System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]");
-        sb.AppendLine($"internal static partial class {SymbolUtilities.BuildExtensionClassName(controlModel.Type)}");
+        var visibility = publish && IsPubliclyAccessible(controlModel.Type) ? "public" : "internal";
+        sb.AppendLine($"{visibility} static partial class {SymbolUtilities.BuildExtensionClassName(controlModel.Type)}");
         sb.AppendLine("{");
 
         foreach (var group in generatedGroups)
@@ -144,4 +157,14 @@ internal sealed class ExternalGeneratorHost
         sb.AppendLine("}");
         return sb.ToString();
     }
+
+    /// <summary>
+    /// A published extension class must not expose less accessible control types in its public
+    /// signatures, so only controls that are visible outside the assembly can be published.
+    /// </summary>
+    internal static bool CanPublish(INamedTypeSymbol type) =>
+        type.DeclaredAccessibility == Accessibility.Public &&
+        (type.ContainingType is null || CanPublish(type.ContainingType));
+
+    private static bool IsPubliclyAccessible(INamedTypeSymbol type) => CanPublish(type);
 }

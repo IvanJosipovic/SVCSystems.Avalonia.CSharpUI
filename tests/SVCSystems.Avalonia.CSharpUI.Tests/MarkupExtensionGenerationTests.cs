@@ -143,6 +143,7 @@ public class MarkupExtensionGenerationTests
         const string source = """
             using Avalonia;
             using Avalonia.Controls;
+            using Avalonia.Data;
             using SVCSystems.Avalonia.CSharpUI;
 
             namespace MarkupExtensionGeneratorFixture
@@ -161,7 +162,12 @@ public class MarkupExtensionGenerationTests
 
                 public static class Usage
                 {
-                    public static void Use(BehaviorControl control, object model) => control.Value(model, x => x);
+                    public static void Use(BehaviorControl control, object model)
+                    {
+                        control.Value(model, x => x);
+                        control.Value(CompiledBinding.Create<BehaviorControl, int>(x => x.Value));
+                        _ = new Style<BehaviorControl>().Value(1);
+                    }
                 }
             }
             """;
@@ -169,6 +175,125 @@ public class MarkupExtensionGenerationTests
         var result = RunFullGenerator(CreateCompilation("DeclarativeViewBase", source));
 
         AssertNoErrors(result.OutputCompilation);
+    }
+
+    [Fact]
+    public void Referenced_declarative_view_base_control_keeps_all_generated_setters()
+    {
+        const string librarySource = """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace ExternalControls
+            {
+                public sealed class ExternalBehaviorControl : Control, IDeclarativeViewBase
+                {
+                    public static readonly StyledProperty<int> ValueProperty =
+                        AvaloniaProperty.Register<ExternalBehaviorControl, int>(nameof(Value));
+
+                    public int Value
+                    {
+                        get => GetValue(ValueProperty);
+                        set => SetValue(ValueProperty, value);
+                    }
+                }
+            }
+            """;
+        var reference = EmitReference(CreateCompilation("ExternalControls", librarySource));
+
+        const string source = """
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static void M() => _ = typeof(ExternalControls.ExternalBehaviorControl);
+            }
+            """;
+        var result = RunGenerator(CreateCompilationWithReferences("Consumer", source, reference));
+
+        AssertNoErrors(result.OutputCompilation);
+        var generated = Assert.Single(result.GeneratedSources, generated =>
+            generated.Contains(
+                "ExternalControls_ExternalBehaviorControl_MarkupExtensions",
+                StringComparison.Ordinal));
+        Assert.Contains("BindingBase", generated, StringComparison.Ordinal);
+        Assert.Contains("Style<", generated, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Publishing_assembly_generates_public_extensions_and_coverage_metadata()
+    {
+        var result = RunGenerator(CreateCompilation("Publisher", CreateSource(
+            "[assembly: SVCSystems.Avalonia.CSharpUI.GeneratePublicMarkupExtensions]",
+            string.Empty)));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, source =>
+            source.Contains(
+                $"public static partial class {FixtureNamespace}_FixtureControl_MarkupExtensions",
+                StringComparison.Ordinal));
+        var coverage = Assert.Single(result.GeneratedSources, source =>
+            source.Contains("PublicMarkupExtensionControlsAttribute", StringComparison.Ordinal));
+        Assert.Contains(
+            $"Publisher|{FixtureNamespace}.FixtureControl",
+            coverage,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Consumer_reuses_published_extensions_without_regenerating_them()
+    {
+        var publisher = RunGenerator(CreateCompilation("Publisher", CreateSource(
+            "[assembly: SVCSystems.Avalonia.CSharpUI.GeneratePublicMarkupExtensions]",
+            string.Empty)));
+        AssertNoErrors(publisher.OutputCompilation);
+
+        const string source = """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static Button Create() => new Button().Width(120);
+            }
+            """;
+        var consumer = RunGenerator(CreateCompilationWithReferences(
+            "Consumer",
+            source,
+            EmitReference(publisher.OutputCompilation)));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        Assert.DoesNotContain(consumer.GeneratedSources, generated =>
+            generated.Contains("Avalonia_Controls_Button_MarkupExtensions", StringComparison.Ordinal));
+
+        // Factories stay local so the consumer can still create the control by its factory name.
+        var factories = Assert.Single(consumer.GeneratedSources, generated =>
+            generated.Contains("internal static class GeneratedControlFactories", StringComparison.Ordinal));
+        Assert.Contains(" Button(", factories, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Explicit_publication_filter_limits_published_controls()
+    {
+        const string source = """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            [assembly: GeneratePublicMarkupExtensions(typeof(Button))]
+
+            public static class Usage
+            {
+                public static TextBlock Create() => new TextBlock { Text = "x" };
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("FilteredPublisher", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        var coverage = Assert.Single(result.GeneratedSources, generated =>
+            generated.Contains("PublicMarkupExtensionControlsAttribute", StringComparison.Ordinal));
+        Assert.Contains("Avalonia.Controls.Button", coverage, StringComparison.Ordinal);
+        Assert.DoesNotContain("Avalonia.Controls.TextBlock", coverage, StringComparison.Ordinal);
     }
 
     [Fact]

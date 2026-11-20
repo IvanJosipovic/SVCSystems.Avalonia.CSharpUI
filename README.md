@@ -42,6 +42,24 @@ Generation is usage-driven: extensions, factories, and registrations are emitted
 
 `SVCSystemsCSharpUIGeneratorMetadataAttribute` can rename generated APIs, suppress generated members or factories, and mark a property as a content slot. For example, `[SVCSystemsCSharpUIGeneratorMetadata(Alias = "Caption")]` renames the generated fluent setter while keeping the underlying Avalonia property unchanged.
 
+## Sharing generated extensions between projects
+
+By default every compilation generates its own internal extension classes. A library can opt in to publishing them as public APIs so its consumers reuse the same extensions instead of regenerating them:
+
+```csharp
+using SVCSystems.Avalonia.CSharpUI;
+
+[assembly: GeneratePublicMarkupExtensions]
+```
+
+Or restrict publication to specific controls and their base types:
+
+```csharp
+[assembly: GeneratePublicMarkupExtensions(typeof(Button), typeof(TextBox))]
+```
+
+The generator emits a `PublicMarkupExtensionControlsAttribute` into the publishing assembly. Projects that reference it read that metadata and skip generation for the covered controls; they still generate their own factories and view registrations, and generate internal extensions for controls the publisher does not cover. Coverage is propagated through publisher chains, so a project that references a publisher inherits the controls published by the assemblies that publisher references. Publishing therefore removes duplicate extension methods between friend assemblies and avoids recompiling the same generated code in every project. Only publicly accessible controls can be published; internal controls keep internal extensions.
+
 ## XAML-only library resources
 
 A referenced library may expose a resource dictionary or styles only as compiled XAML. Request a typed, reflection-free factory instead of loading the URI at runtime:
