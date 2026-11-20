@@ -52,6 +52,14 @@ internal sealed class ControlCatalog
         var attachedHostsByName = new Dictionary<string, INamedTypeSymbol>(StringComparer.Ordinal);
         var localEntries = new List<CatalogEntry>();
         var localAssembly = compilation.Assembly;
+        var assembliesByIdentity = new Dictionary<AssemblyIdentity, IAssemblySymbol>();
+        foreach (var reference in compilation.References)
+        {
+            if (compilation.GetAssemblyOrModuleSymbol(reference) is IAssemblySymbol referencedAssembly)
+            {
+                assembliesByIdentity[referencedAssembly.Identity] = referencedAssembly;
+            }
+        }
 
         foreach (var type in EnumerateClasses(localAssembly.GlobalNamespace, publicOnly: false, skipGeneric: false))
         {
@@ -63,7 +71,7 @@ internal sealed class ControlCatalog
         {
             if (compilation.GetAssemblyOrModuleSymbol(reference) is not IAssemblySymbol assembly ||
                 SymbolEqualityComparer.Default.Equals(assembly, localAssembly) ||
-                !ReferencesAvalonia(assembly))
+                !ReferencesAvalonia(assembly, assembliesByIdentity))
             {
                 continue;
             }
@@ -112,20 +120,51 @@ internal sealed class ControlCatalog
 
         byKey.Add(key, type);
 
+        // Base types are part of the usage closure. Keeping their symbols here (including
+        // constructed generics such as GenericBase<int>) lets the generator resolve keys that
+        // would otherwise be missing from a catalog of open definitions only.
+        for (var baseType = type.BaseType;
+             baseType is not null && baseType.SpecialType != SpecialType.System_Object;
+             baseType = baseType.BaseType)
+        {
+            if (baseType.IsAccessibleFromGeneratedCode())
+            {
+                var baseKey = TypeKey.Create(baseType);
+                if (!byKey.ContainsKey(baseKey))
+                {
+                    byKey.Add(baseKey, baseType);
+                }
+            }
+        }
+
         var factoryName = ControlModelBuilder.GetMetadata(type).Alias ?? type.Name;
         factoryName = SymbolUtilities.CleanIdentifier(factoryName) ?? type.Name;
 
         var entry = new CatalogEntry(key, type, isLocal);
-        if (!byFactoryName.TryGetValue(factoryName, out var entries))
-        {
-            entries = new List<CatalogEntry>();
-            byFactoryName.Add(factoryName, entries);
-        }
+        AddName(byFactoryName, factoryName, entry);
 
-        entries.Add(entry);
+        // A referenced control aliased for its factory must still be discoverable by its CLR name.
+        AddName(byFactoryName, SymbolUtilities.CleanIdentifier(type.Name) ?? type.Name, entry);
         if (isLocal)
         {
             localEntries.Add(entry);
+        }
+    }
+
+    private static void AddName(
+        Dictionary<string, List<CatalogEntry>> byFactoryName,
+        string name,
+        CatalogEntry entry)
+    {
+        if (!byFactoryName.TryGetValue(name, out var entries))
+        {
+            entries = new List<CatalogEntry>();
+            byFactoryName.Add(name, entries);
+        }
+
+        if (!entries.Contains(entry))
+        {
+            entries.Add(entry);
         }
     }
 
@@ -174,18 +213,29 @@ internal sealed class ControlCatalog
         }
     }
 
-    private static bool ReferencesAvalonia(IAssemblySymbol assembly)
+    private static bool ReferencesAvalonia(
+        IAssemblySymbol assembly,
+        Dictionary<AssemblyIdentity, IAssemblySymbol> assembliesByIdentity,
+        HashSet<IAssemblySymbol>? visited = null)
     {
         if (assembly.Name.StartsWith("Avalonia", StringComparison.Ordinal))
         {
             return true;
         }
 
+        visited ??= new HashSet<IAssemblySymbol>(SymbolEqualityComparer.Default);
+        if (!visited.Add(assembly))
+        {
+            return false;
+        }
+
         foreach (var module in assembly.Modules)
         {
             foreach (var reference in module.ReferencedAssemblies)
             {
-                if (reference.Name is "Avalonia.Base" or "Avalonia.Controls" or "Avalonia.Markup" or "Avalonia.Themes.Fluent")
+                if (reference.Name is "Avalonia.Base" or "Avalonia.Controls" or "Avalonia.Markup" or "Avalonia.Themes.Fluent" ||
+                    (assembliesByIdentity.TryGetValue(reference, out var referencedAssembly) &&
+                     ReferencesAvalonia(referencedAssembly, assembliesByIdentity, visited)))
                 {
                     return true;
                 }
@@ -202,14 +252,10 @@ internal sealed class ControlCatalog
     {
         foreach (var type in ns.GetTypeMembers())
         {
-            if (type.TypeKind != TypeKind.Class ||
-                (skipGeneric && type.IsGenericType) ||
-                (publicOnly && type.DeclaredAccessibility != Accessibility.Public))
+            foreach (var candidate in EnumerateTypeAndNested(type, publicOnly, skipGeneric))
             {
-                continue;
+                yield return candidate;
             }
-
-            yield return type;
         }
 
         foreach (var namespaceMember in ns.GetNamespaceMembers())
@@ -217,6 +263,29 @@ internal sealed class ControlCatalog
             foreach (var type in EnumerateClasses(namespaceMember, publicOnly, skipGeneric))
             {
                 yield return type;
+            }
+        }
+    }
+
+    private static IEnumerable<INamedTypeSymbol> EnumerateTypeAndNested(
+        INamedTypeSymbol type,
+        bool publicOnly,
+        bool skipGeneric)
+    {
+        if (type.TypeKind != TypeKind.Class ||
+            (skipGeneric && type.IsGenericType) ||
+            (publicOnly && type.DeclaredAccessibility != Accessibility.Public))
+        {
+            yield break;
+        }
+
+        yield return type;
+
+        foreach (var nested in type.GetTypeMembers())
+        {
+            foreach (var candidate in EnumerateTypeAndNested(nested, publicOnly, skipGeneric))
+            {
+                yield return candidate;
             }
         }
     }

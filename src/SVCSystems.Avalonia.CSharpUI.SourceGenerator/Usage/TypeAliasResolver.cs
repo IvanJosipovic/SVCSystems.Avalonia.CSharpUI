@@ -18,7 +18,7 @@ internal readonly struct AliasResolutionResult(
 /// every context. To keep both working, emit a global alias for each factory name that the
 /// application also uses as a type (e.g. Path -&gt; System.IO.Path, Grid -&gt; Avalonia.Controls.Grid).
 /// This runs on the pre-generation compilation, where the static import is not yet present, so
-/// names resolve to their real types. Names that cannot be aliased are reported to the caller.
+/// names resolve to their real types. Names that cannot be safely aliased are reported as skipped.
 /// </summary>
 internal static class TypeAliasResolver
 {
@@ -31,7 +31,8 @@ internal static class TypeAliasResolver
                 ImmutableArray<(string, string)>.Empty);
         }
 
-        var typesByName = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var typesByName = new Dictionary<string, HashSet<INamedTypeSymbol>>(StringComparer.Ordinal);
+        var skippedByName = new Dictionary<string, string>(StringComparer.Ordinal);
         var userAliases = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var syntaxTree in compilation.SyntaxTrees)
@@ -58,19 +59,40 @@ internal static class TypeAliasResolver
                     continue;
                 }
 
-                var typeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                if (!typesByName.TryGetValue(name.Identifier.ValueText, out var names))
+                if (!CanUseInGlobalAlias(type, compilation))
                 {
-                    names = new HashSet<string>(StringComparer.Ordinal);
-                    typesByName.Add(name.Identifier.ValueText, names);
+                    skippedByName[name.Identifier.ValueText] = "cannot be used in a global alias";
+                    continue;
                 }
 
-                names.Add(typeName);
+                if (!typesByName.TryGetValue(name.Identifier.ValueText, out var types))
+                {
+                    types = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+                    typesByName.Add(name.Identifier.ValueText, types);
+                }
+
+                types.Add(type);
             }
+        }
+
+        var globalNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var type in compilation.GlobalNamespace.GetTypeMembers())
+        {
+            globalNames.Add(type.Name);
+        }
+
+        foreach (var ns in compilation.GlobalNamespace.GetNamespaceMembers())
+        {
+            globalNames.Add(ns.Name);
         }
 
         var aliases = ImmutableArray.CreateBuilder<KeyValuePair<string, string>>();
         var skipped = ImmutableArray.CreateBuilder<(string Name, string Reason)>();
+        foreach (var pair in skippedByName.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+        {
+            skipped.Add((pair.Key, pair.Value));
+        }
+
         foreach (var pair in typesByName.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
         {
             if (pair.Value.Count > 1)
@@ -82,12 +104,44 @@ internal static class TypeAliasResolver
                 // A generated global alias would collide (CS1537) with a user-declared using alias.
                 skipped.Add((pair.Key, "is already used as a using alias"));
             }
+            else if (globalNames.Contains(pair.Key))
+            {
+                skipped.Add((pair.Key, "conflicts with a global namespace member"));
+            }
             else
             {
-                aliases.Add(new KeyValuePair<string, string>(pair.Key, pair.Value.Single()));
+                aliases.Add(new KeyValuePair<string, string>(
+                    pair.Key,
+                    pair.Value.Single().ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)));
             }
         }
 
-        return new AliasResolutionResult(aliases.ToImmutable(), skipped.ToImmutable());
+        return new AliasResolutionResult(aliases.ToImmutable(), skipped.ToImmutable().Distinct().ToImmutableArray());
+    }
+
+    private static bool CanUseInGlobalAlias(INamedTypeSymbol type, Compilation compilation)
+    {
+        for (INamedTypeSymbol? current = type; current is not null; current = current.ContainingType)
+        {
+            if (current.DeclaredAccessibility is not (Accessibility.Public or Accessibility.Internal or Accessibility.ProtectedOrInternal))
+            {
+                return false;
+            }
+
+            var sameAssembly = SymbolEqualityComparer.Default.Equals(current.ContainingAssembly, compilation.Assembly);
+            if (!sameAssembly && current.DeclaredAccessibility != Accessibility.Public)
+            {
+                return false;
+            }
+
+            // A type nested in a generic container has out-of-scope type parameters in a
+            // compilation-unit alias, and an open generic cannot be named as an alias target.
+            if (current.IsGenericType)
+            {
+                return false;
+            }
+        }
+
+        return type.TypeArguments.All(static argument => argument.TypeKind != TypeKind.TypeParameter);
     }
 }

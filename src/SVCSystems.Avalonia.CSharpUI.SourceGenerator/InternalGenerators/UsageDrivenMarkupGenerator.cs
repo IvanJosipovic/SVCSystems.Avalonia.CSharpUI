@@ -8,6 +8,95 @@ using SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
 
+internal readonly struct GeneratedSource(string hintName, string text) : IEquatable<GeneratedSource>
+{
+    internal string HintName { get; } = hintName;
+
+    internal string Text { get; } = text;
+
+    public bool Equals(GeneratedSource other) =>
+        string.Equals(HintName, other.HintName, StringComparison.Ordinal) &&
+        string.Equals(Text, other.Text, StringComparison.Ordinal);
+
+    public override bool Equals(object? obj) => obj is GeneratedSource other && Equals(other);
+
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            return ((HintName?.GetHashCode() ?? 0) * 397) ^ (Text?.GetHashCode() ?? 0);
+        }
+    }
+}
+
+internal readonly struct GenerationDiagnostic(string id, string message, DiagnosticSeverity severity) : IEquatable<GenerationDiagnostic>
+{
+    internal string Id { get; } = id;
+
+    internal string Message { get; } = message;
+
+    internal DiagnosticSeverity Severity { get; } = severity;
+
+    public bool Equals(GenerationDiagnostic other) =>
+        string.Equals(Id, other.Id, StringComparison.Ordinal) &&
+        string.Equals(Message, other.Message, StringComparison.Ordinal) &&
+        Severity == other.Severity;
+
+    public override bool Equals(object? obj) => obj is GenerationDiagnostic other && Equals(other);
+
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            var hash = (Id?.GetHashCode() ?? 0) * 397 ^ (Message?.GetHashCode() ?? 0);
+            return (hash * 397) ^ (int)Severity;
+        }
+    }
+}
+
+/// <summary>
+/// The complete generated output for one compilation. Equality is based on the generated text, so
+/// Roslyn caches the registered source output across edits that don't change the generated APIs.
+/// </summary>
+internal sealed class GenerationResult(
+    ImmutableArray<GeneratedSource> sources,
+    ImmutableArray<GenerationDiagnostic> diagnostics)
+{
+    internal ImmutableArray<GeneratedSource> Sources { get; } = sources;
+
+    internal ImmutableArray<GenerationDiagnostic> Diagnostics { get; } = diagnostics;
+}
+
+internal sealed class GenerationResultComparer : IEqualityComparer<GenerationResult>
+{
+    internal static readonly GenerationResultComparer Instance = new();
+
+    public bool Equals(GenerationResult? x, GenerationResult? y) =>
+        ReferenceEquals(x, y) ||
+        (x is not null && y is not null &&
+         x.Sources.SequenceEqual(y.Sources) &&
+         x.Diagnostics.SequenceEqual(y.Diagnostics));
+
+    public int GetHashCode(GenerationResult result)
+    {
+        unchecked
+        {
+            var hash = 17;
+            foreach (var source in result.Sources)
+            {
+                hash = (hash * 31) + source.GetHashCode();
+            }
+
+            foreach (var diagnostic in result.Diagnostics)
+            {
+                hash = (hash * 31) + diagnostic.GetHashCode();
+            }
+
+            return hash;
+        }
+    }
+}
+
 /// <summary>
 /// Generates fluent extensions, control factories and factory registrations for the controls
 /// that the application actually mentions in source (plus their base-type closure).
@@ -45,21 +134,55 @@ public sealed class UsageDrivenMarkupGenerator
     {
         var names = UsageNameProvider.Create(context).Collect();
         var input = names.Combine(context.CompilationProvider);
-        context.RegisterSourceOutput(input, static (sourceContext, pair) =>
-            Generate(sourceContext, pair.Left, pair.Right));
+
+        // Produce an equatable result first. Registering the output on that result (instead of on
+        // the compilation) lets Roslyn cache it when an unrelated edit leaves generated text and
+        // diagnostics unchanged, instead of re-adding every file on each keystroke.
+        var generation = input
+            .Select(static (pair, cancellationToken) => Generate(pair.Left, pair.Right, cancellationToken))
+            .WithComparer(GenerationResultComparer.Instance);
+
+        context.RegisterSourceOutput(generation, static (sourceContext, result) =>
+        {
+            foreach (var source in result.Sources)
+            {
+                sourceContext.AddSource(source.HintName, SourceText.From(source.Text, Encoding.UTF8));
+            }
+
+            foreach (var diagnostic in result.Diagnostics)
+            {
+                sourceContext.ReportDiagnostic(Diagnostic.Create(
+                    new DiagnosticDescriptor(
+                        diagnostic.Id,
+                        diagnostic.Id,
+                        diagnostic.Message,
+                        "SVCSystems.Avalonia.CSharpUI",
+                        diagnostic.Severity,
+                        isEnabledByDefault: true),
+                    Location.None));
+            }
+        });
     }
 
-    private static void Generate(
-        SourceProductionContext context,
+    private static GenerationResult Generate(
         ImmutableArray<string> names,
-        Compilation compilation)
+        Compilation compilation,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var sources = new List<GeneratedSource>();
+        var diagnostics = new List<GenerationDiagnostic>();
+
         var catalog = ControlCatalog.Build(compilation);
         var usage = UsageResolver.Resolve(catalog, names);
 
         foreach (var ambiguousName in usage.AmbiguousNames)
         {
-            context.ReportDiagnostic(Diagnostic.Create(AmbiguousControlName, Location.None, ambiguousName));
+            diagnostics.Add(new GenerationDiagnostic(
+                "SVCUIGEN006",
+                string.Format(AmbiguousControlName.MessageFormat.ToString(), ambiguousName),
+                DiagnosticSeverity.Info));
         }
 
         var cache = new Dictionary<INamedTypeSymbol, ControlModel>(SymbolEqualityComparer.Default);
@@ -78,13 +201,33 @@ public sealed class UsageDrivenMarkupGenerator
             }
             catch (Exception exception)
             {
-                ReportFailure(context, symbol, exception);
+                AddFailure(diagnostics, symbol, exception);
                 continue;
             }
 
             if (!model.IgnoreGeneratedExtensions)
             {
                 models.Add(model);
+            }
+        }
+
+        // When both an open generic definition and a constructed version are in the set, the
+        // constructed one is what source actually uses. Emitting both creates duplicate extension
+        // classes with the same generated name.
+        for (var index = models.Count - 1; index >= 0; index--)
+        {
+            var model = models[index];
+            if (!model.Type.IsGenericType ||
+                model.Type.TypeArguments.All(static argument => argument.TypeKind != TypeKind.TypeParameter))
+            {
+                continue;
+            }
+
+            if (models.Any(candidate =>
+                    !ReferenceEquals(candidate, model) &&
+                    SymbolEqualityComparer.Default.Equals(candidate.Type.OriginalDefinition, model.Type.OriginalDefinition)))
+            {
+                models.RemoveAt(index);
             }
         }
 
@@ -104,22 +247,25 @@ public sealed class UsageDrivenMarkupGenerator
                     ? "Local_"
                     : "External_";
                 var hintName = $"{prefix}{SymbolUtilities.RemoveIllegalFileNameCharacters(typeName)}.g.cs";
-                context.AddSource(hintName, SourceText.From(code!, Encoding.UTF8));
+                sources.Add(new GeneratedSource(hintName, code!));
             }
             catch (Exception exception)
             {
-                ReportFailure(context, model.Type, exception);
+                AddFailure(diagnostics, model.Type, exception);
             }
         }
 
         var factoryTargets = GetFactoryTargets(models);
-        GenerateFactoryUsings(context, compilation, factoryTargets);
-        GenerateFactories(context, compilation, factoryTargets);
-        GenerateRegistrations(context, factoryTargets);
+        GenerateFactoryUsings(sources, diagnostics, compilation, factoryTargets);
+        GenerateFactories(sources, compilation, factoryTargets);
+        GenerateRegistrations(sources, GetRegistrationTargets(models));
+
+        return new GenerationResult(sources.ToImmutableArray(), diagnostics.ToImmutableArray());
     }
 
     private static void GenerateFactoryUsings(
-        SourceProductionContext context,
+        List<GeneratedSource> sources,
+        List<GenerationDiagnostic> diagnostics,
         Compilation compilation,
         IReadOnlyList<ControlModel> factories)
     {
@@ -130,11 +276,10 @@ public sealed class UsageDrivenMarkupGenerator
 
         foreach (var skipped in resolution.Skipped)
         {
-            context.ReportDiagnostic(Diagnostic.Create(
-                UnaliasableFactoryName,
-                Location.None,
-                skipped.Name,
-                skipped.Reason));
+            diagnostics.Add(new GenerationDiagnostic(
+                "SVCUIGEN007",
+                string.Format(UnaliasableFactoryName.MessageFormat.ToString(), skipped.Name, skipped.Reason),
+                DiagnosticSeverity.Warning));
         }
 
         var source = new StringBuilder(512);
@@ -145,11 +290,11 @@ public sealed class UsageDrivenMarkupGenerator
             source.AppendLine($"global using {alias.Key} = {alias.Value};");
         }
 
-        context.AddSource("SVCSystemsAvaloniaFactoryUsings.g.cs", SourceText.From(source.ToString(), Encoding.UTF8));
+        sources.Add(new GeneratedSource("SVCSystemsAvaloniaFactoryUsings.g.cs", source.ToString()));
     }
 
     private static void GenerateFactories(
-        SourceProductionContext context,
+        List<GeneratedSource> sources,
         Compilation compilation,
         IReadOnlyList<ControlModel> factories)
     {
@@ -193,12 +338,12 @@ public sealed class UsageDrivenMarkupGenerator
         }
 
         source.AppendLine("}");
-        context.AddSource("SVCSystemsCSharpUIControlFactories.g.cs", SourceText.From(source.ToString(), Encoding.UTF8));
+        sources.Add(new GeneratedSource("SVCSystemsCSharpUIControlFactories.g.cs", source.ToString()));
     }
 
-    private static void GenerateRegistrations(SourceProductionContext context, IReadOnlyList<ControlModel> factories)
+    private static void GenerateRegistrations(List<GeneratedSource> sources, IReadOnlyList<ControlModel> models)
     {
-        foreach (var model in factories)
+        foreach (var model in models)
         {
             var typeIdentifier = SymbolUtilities.BuildTypeIdentifier(model.Type);
             var registrationClassName = $"{typeIdentifier}_ViewFactoryRegistration";
@@ -218,24 +363,34 @@ public sealed class UsageDrivenMarkupGenerator
             sb.AppendLine("    }");
             sb.AppendLine("}");
 
-            context.AddSource(hintName, SourceText.From(sb.ToString(), Encoding.UTF8));
+            sources.Add(new GeneratedSource(hintName, sb.ToString()));
         }
     }
 
+    private static bool IsRegistrationEligible(ControlModel model) =>
+        model.GenerateFactory &&
+        model.IsConstructible &&
+        model.Type.IsOrInheritsFrom("Avalonia.Controls.Control");
+
+    private static ControlModel[] GetRegistrationTargets(IReadOnlyList<ControlModel> models) =>
+        [.. models
+            .Where(static model => IsRegistrationEligible(model))
+            .OrderBy(static model => model.Type.ToDisplayString(), StringComparer.Ordinal)];
+
     private static ControlModel[] GetFactoryTargets(IReadOnlyList<ControlModel> models) =>
         [.. models
-            .Where(static model => model.GenerateFactory &&
-                model.IsConstructible &&
-                model.Type.IsOrInheritsFrom("Avalonia.Controls.Control"))
+            .Where(static model => IsRegistrationEligible(model))
             .GroupBy(static model => SymbolUtilities.CleanIdentifier(model.FactoryName) ?? model.Type.Name, StringComparer.Ordinal)
             .Where(static group => group.Count() == 1)
             .Select(static group => group.First())
             .OrderBy(static model => model.Type.ToDisplayString(), StringComparer.Ordinal)];
 
-    private static void ReportFailure(SourceProductionContext context, INamedTypeSymbol symbol, Exception exception) =>
-        context.ReportDiagnostic(Diagnostic.Create(
-            ExtensionGenerationFailed,
-            symbol.Locations.FirstOrDefault(),
-            symbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat),
-            exception.Message));
+    private static void AddFailure(List<GenerationDiagnostic> diagnostics, INamedTypeSymbol symbol, Exception exception) =>
+        diagnostics.Add(new GenerationDiagnostic(
+            "SVCUIGEN003",
+            string.Format(
+                ExtensionGenerationFailed.MessageFormat.ToString(),
+                symbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat),
+                exception.Message),
+            DiagnosticSeverity.Error));
 }
