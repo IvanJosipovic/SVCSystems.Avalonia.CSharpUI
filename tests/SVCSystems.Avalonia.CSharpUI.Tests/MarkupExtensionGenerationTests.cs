@@ -20,28 +20,45 @@ public class MarkupExtensionGenerationTests
     [Fact]
     public void Compiled_fixture_extensions_match_the_pinned_amd_output()
     {
-        var assembly = typeof(MarkupExtensionGenerationTests).Assembly;
-        var generatedSourcesPath = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
-            .Single(static metadata => metadata.Key == "SVCSystems.CSharpUI.GeneratedSourcesPath")
-            .Value;
-        Assert.False(string.IsNullOrWhiteSpace(generatedSourcesPath));
-
-        var expectedSourcesPath = Path.Combine(AppContext.BaseDirectory, "TestData");
-        var expectedFiles = Directory.GetFiles(expectedSourcesPath, "*Extensions.cs");
+        var testDataPath = Path.Combine(AppContext.BaseDirectory, "TestData");
+        var expectedFiles = Directory.GetFiles(testDataPath, "*Extensions.cs");
         Assert.NotEmpty(expectedFiles);
+
+        // Run the generator in memory instead of reading EmitCompilerGeneratedFiles from disk:
+        // that path depends on the build configuration and can contain stale files on CI.
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var implicitUsings = CSharpSyntaxTree.ParseText(
+            "global using System;\nglobal using System.Collections.Generic;\nglobal using System.Linq;\nglobal using Avalonia;\nglobal using Avalonia.Controls;\nglobal using SVCSystems.Avalonia.CSharpUI;\n",
+            parseOptions,
+            cancellationToken: TestContext.Current.CancellationToken);
+        var fixtureTrees = Directory.GetFiles(testDataPath, "*.cs")
+            .Where(static path => !Path.GetFileName(path).EndsWith("Extensions.cs", StringComparison.Ordinal))
+            .Select(path => CSharpSyntaxTree.ParseText(
+                File.ReadAllText(path),
+                parseOptions,
+                cancellationToken: TestContext.Current.CancellationToken))
+            .Prepend(implicitUsings);
+        var compilation = CSharpCompilation.Create(
+            "FixtureControls",
+            fixtureTrees,
+            PlatformReferences,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+        var result = RunGenerator(compilation);
+        AssertNoErrors(result.OutputCompilation);
 
         foreach (var expectedFile in expectedFiles)
         {
             var fixtureName = Path.GetFileNameWithoutExtension(expectedFile);
             Assert.EndsWith("Extensions", fixtureName, StringComparison.Ordinal);
             var controlName = fixtureName[..^"Extensions".Length];
-            var generatedFileName = $"Local_Tests.{controlName}.g.cs";
-            var generatedFile = Assert.Single(Directory.GetFiles(
-                generatedSourcesPath!, generatedFileName, SearchOption.AllDirectories));
+            var generated = Assert.Single(result.GeneratedSources, source =>
+                source.Contains($"internal static partial class Tests_{controlName}_MarkupExtensions", StringComparison.Ordinal));
 
+            // Documentation comments depend on whether the host compilation retains doc comments;
+            // they have their own dedicated test. Compare the generated API shape only.
             Assert.Equal(
-                NormalizeGeneratedSource(File.ReadAllText(expectedFile)),
-                NormalizeGeneratedSource(File.ReadAllText(generatedFile)));
+                NormalizeIgnoringDocumentation(File.ReadAllText(expectedFile)),
+                NormalizeIgnoringDocumentation(generated));
         }
     }
 
@@ -833,6 +850,13 @@ public class MarkupExtensionGenerationTests
                 .Split('\n')
                 .Select(static line => line.TrimEnd()))
         .TrimEnd('\n');
+
+    private static string NormalizeIgnoringDocumentation(string source) =>
+        NormalizeGeneratedSource(string.Join(
+            "\n",
+            source.Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Split('\n')
+                .Where(static line => !line.TrimStart().StartsWith("///", StringComparison.Ordinal))));
 
     private static void AssertNoErrors(CSharpCompilation compilation)
     {

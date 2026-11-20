@@ -14,6 +14,7 @@
   <ItemGroup>
     <Compile Remove="TestData\**\*Extensions.cs" />
     <Content Include="TestData\**\*Extensions.cs" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="TestData\**\*.cs" Exclude="TestData\**\*Extensions.cs" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
