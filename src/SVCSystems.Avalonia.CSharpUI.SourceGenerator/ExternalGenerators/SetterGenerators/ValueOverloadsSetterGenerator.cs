@@ -10,7 +10,8 @@ internal sealed class ValueOverloadsSetterGenerator : ExtensionGeneratorBase<Pro
     {
         StringBuilder? extensionText = null;
 
-        if (!info.ValueType.ContainingNamespace.ToDisplayString().StartsWith("System", StringComparison.Ordinal) &&
+        var valueNamespace = info.ValueType.ContainingNamespace?.ToDisplayString() ?? string.Empty;
+        if (!valueNamespace.StartsWith("System", StringComparison.Ordinal) &&
             info.ValueType.IsValueType)
         {
             foreach (var constructor in info.ValueType.GetMembers().OfType<IMethodSymbol>().Where(static m => m.MethodKind == MethodKind.Constructor))

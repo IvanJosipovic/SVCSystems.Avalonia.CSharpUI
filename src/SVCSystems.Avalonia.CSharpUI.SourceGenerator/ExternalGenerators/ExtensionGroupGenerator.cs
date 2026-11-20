@@ -12,7 +12,11 @@ internal sealed class ExtensionGroupGenerator(
 {
     public string GroupName { get; } = groupName;
 
-    public string? Generate(ControlModel controlModel, Compilation? compilation, out int generationsCount)
+    public string? Generate(
+        ControlModel controlModel,
+        Compilation? compilation,
+        out int generationsCount,
+        ISet<Type>? suppressedGenerators = null)
     {
         generationsCount = 0;
 
@@ -22,6 +26,11 @@ internal sealed class ExtensionGroupGenerator(
             sb.AppendLine($" // {extensionInfo.MemberName}");
             foreach (var generator in generators)
             {
+                if (suppressedGenerators?.Contains(generator.GetType()) == true)
+                {
+                    continue;
+                }
+
                 var extensionCode = generator.GetExtension(extensionInfo);
                 if (string.IsNullOrWhiteSpace(extensionCode))
                 {

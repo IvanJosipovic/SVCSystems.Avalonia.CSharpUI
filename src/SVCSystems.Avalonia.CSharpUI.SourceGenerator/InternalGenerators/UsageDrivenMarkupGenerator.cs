@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Text;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.Analysis;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
+using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.SetterGenerators;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
@@ -120,6 +121,15 @@ public sealed class UsageDrivenMarkupGenerator
         defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true,
         description: "A control name used in source matched more than one type. All matches were generated so code compiles regardless of which type was meant.");
+
+    // AvaloniaPropertyExtensionsGenerator emits these two overload families for local controls
+    // implementing IDeclarativeViewBase. Other generated helpers (BindingBase setters, style
+    // setters, events, attached properties) must still be emitted here.
+    private static readonly HashSet<Type> DeclarativeViewSuppressedGenerators =
+    [
+        typeof(ValueSetterGenerator),
+        typeof(BindFromExpressionSetterGenerator)
+    ];
 
     internal static readonly DiagnosticDescriptor UnaliasableFactoryName = new(
         id: "SVCUIGEN007",
@@ -260,10 +270,17 @@ public sealed class UsageDrivenMarkupGenerator
                 continue;
             }
 
+            ISet<Type>? suppressedGenerators = null;
+            if (SymbolEqualityComparer.Default.Equals(model.Type.ContainingAssembly, compilation.Assembly) &&
+                MarkupTypeHelpers.IsAvaloniaMarkupView(model.Type))
+            {
+                suppressedGenerators = DeclarativeViewSuppressedGenerators;
+            }
+
             try
             {
                 var publish = publishing.IsPublisher && ExternalGeneratorHost.CanPublish(model.Type);
-                var code = host.GenerateExtensions(model, compilation, publish);
+                var code = host.GenerateExtensions(model, compilation, publish, suppressedGenerators);
                 if (string.IsNullOrWhiteSpace(code))
                 {
                     continue;
