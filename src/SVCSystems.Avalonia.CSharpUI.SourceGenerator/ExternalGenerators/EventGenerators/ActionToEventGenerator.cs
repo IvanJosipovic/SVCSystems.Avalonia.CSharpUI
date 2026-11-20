@@ -56,7 +56,7 @@ internal sealed class ActionToEventGenerator : ExtensionGeneratorBase<EventExten
         {
             return $"{documentation}{obsolete}public static {@event.ReturnType} On{@event.ExtensionName}{@event.GenericArg}(this {@event.ReturnType} control, {argsString}, global::Avalonia.Interactivity.RoutingStrategies? routes = null) {@event.GenericConstraint}\n" +
                    $"{{\n" +
-                   $"    control.AddHandler({@event.ControlTypeName}.{@event.EventName}Event, ({lambdaParameters}) => {actionCall}, routes ?? {@event.ControlTypeName}.{@event.EventName}Event.RoutingStrategies);\n" +
+                   $"    control.AddHandler({@event.ControlTypeName}.{@event.EventName}Event, ({@event.EventHandler})(({lambdaParameters}) => {actionCall}), routes ?? {@event.ControlTypeName}.{@event.EventName}Event.RoutingStrategies);\n" +
                    $"    return control;\n" +
                    $"}}\n";
         }

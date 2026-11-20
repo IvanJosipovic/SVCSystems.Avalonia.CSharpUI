@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using Avalonia;
 using Avalonia.Controls;
 using SVCSystems.Avalonia.CSharpUI;
+using SVCSystems.Avalonia.CSharpUI.SourceGenerator;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -104,6 +105,70 @@ public class MarkupExtensionGenerationTests
                 StringComparison.Ordinal));
         Assert.DoesNotContain("OnSharedEvent", generated, StringComparison.Ordinal);
         Assert.Contains("OnInstanceEvent", generated, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Untyped_routed_event_generates_a_compilable_helper()
+    {
+        const string source = """
+            using Avalonia.Controls;
+            using Avalonia.Interactivity;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace MarkupExtensionGeneratorFixture
+            {
+                public class UntypedRoutedEventControl : Control
+                {
+                    public static readonly RoutedEvent ClickEvent =
+                        new("Click", RoutingStrategies.Bubble, typeof(UntypedRoutedEventControl), typeof(System.EventHandler<RoutedEventArgs>));
+
+                    public event System.EventHandler<RoutedEventArgs>? Click;
+                }
+            }
+            """;
+
+        var result = RunGenerator(CreateCompilation("UntypedRoutedEvent", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        var generated = Assert.Single(result.GeneratedSources, generated =>
+            generated.Contains(
+                "internal static partial class MarkupExtensionGeneratorFixture_UntypedRoutedEventControl_MarkupExtensions",
+                StringComparison.Ordinal));
+        Assert.Contains("OnClick", generated, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Declarative_view_base_control_gets_one_set_of_setters()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace MarkupExtensionGeneratorFixture
+            {
+                public sealed class BehaviorControl : Control, IDeclarativeViewBase
+                {
+                    public static readonly StyledProperty<int> ValueProperty =
+                        AvaloniaProperty.Register<BehaviorControl, int>(nameof(Value));
+
+                    public int Value
+                    {
+                        get => GetValue(ValueProperty);
+                        set => SetValue(ValueProperty, value);
+                    }
+                }
+
+                public static class Usage
+                {
+                    public static void Use(BehaviorControl control, object model) => control.Value(model, x => x);
+                }
+            }
+            """;
+
+        var result = RunFullGenerator(CreateCompilation("DeclarativeViewBase", source));
+
+        AssertNoErrors(result.OutputCompilation);
     }
 
     [Fact]
@@ -981,11 +1046,17 @@ public class MarkupExtensionGenerationTests
         Assert.NotEmpty(secondResult.GeneratedSources);
     }
 
-    private static GeneratorResult RunGenerator(CSharpCompilation compilation)
+    private static GeneratorResult RunFullGenerator(CSharpCompilation compilation) =>
+        RunGenerator(compilation, new Generator().AsSourceGenerator());
+
+    private static GeneratorResult RunGenerator(CSharpCompilation compilation) =>
+        RunGenerator(compilation, new ExternalAssemblyExtensionsGenerator().AsSourceGenerator());
+
+    private static GeneratorResult RunGenerator(CSharpCompilation compilation, ISourceGenerator generator)
     {
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
         GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            [new ExternalAssemblyExtensionsGenerator().AsSourceGenerator()],
+            [generator],
             parseOptions: parseOptions);
         driver = driver.RunGeneratorsAndUpdateCompilation(
             compilation,

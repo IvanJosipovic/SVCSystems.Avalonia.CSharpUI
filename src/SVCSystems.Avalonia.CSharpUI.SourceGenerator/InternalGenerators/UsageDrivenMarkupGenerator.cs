@@ -234,6 +234,13 @@ public sealed class UsageDrivenMarkupGenerator
         var host = new ExternalGeneratorHost();
         foreach (var model in models)
         {
+            // AvaloniaPropertyExtensionsGenerator emits setters for local controls that implement
+            // IDeclarativeViewBase. Emitting them here too produces duplicate extension methods.
+            if (MarkupTypeHelpers.IsAvaloniaMarkupView(model.Type))
+            {
+                continue;
+            }
+
             try
             {
                 var code = host.GenerateExtensions(model, compilation);
