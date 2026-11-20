@@ -203,6 +203,28 @@ internal static class SymbolUtilities
     internal static string RemoveTrailingProperty(string source) =>
         source.EndsWith("Property") ? source.Substring(0, source.Length - "Property".Length) : source;
 
+    /// <summary>
+    /// Builds a CREF-safe name for a type. C# documentation IDs use braces for generic arguments;
+    /// emitting the raw C# type name (with angle brackets and commas) produces malformed XML.
+    /// </summary>
+    internal static string GetCrefName(INamedTypeSymbol type)
+    {
+        var prefix = type.ContainingType is not null
+            ? GetCrefName(type.ContainingType) + "."
+            : type.ContainingNamespace is { IsGlobalNamespace: false } ns
+                ? "global::" + ns.ToDisplayString() + "."
+                : "global::";
+
+        if (type.TypeArguments.Length == 0)
+        {
+            return prefix + type.Name;
+        }
+
+        var arguments = string.Join(",", type.TypeArguments.Select(argument =>
+            argument is INamedTypeSymbol named ? GetCrefName(named) : argument.GetFullTypeName()));
+        return $"{prefix}{type.Name}{{{arguments}}}";
+    }
+
     internal static string GetFullTypeName(this ITypeSymbol symbol)
     {
         var fullName = symbol.ToDisplayString(FullyQualifiedGlobalFormat);

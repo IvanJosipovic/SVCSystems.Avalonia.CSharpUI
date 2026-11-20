@@ -395,7 +395,7 @@ public sealed class UsageDrivenMarkupGenerator
             }
             else
             {
-                source.AppendLine($"    /// <summary>Creates a new <see cref=\"{typeName}\"/>.</summary>");
+                source.AppendLine($"    /// <summary>Creates a new <see cref=\"{SymbolUtilities.GetCrefName(model.Type)}\"/>.</summary>");
             }
             source.AppendLine($"    public static {typeName} {methodName}([global::System.Runtime.CompilerServices.CallerFilePath] string? sourceFile = null, [global::System.Runtime.CompilerServices.CallerLineNumber] int sourceLine = 0)");
             source.AppendLine("    {");

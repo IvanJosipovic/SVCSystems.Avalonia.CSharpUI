@@ -30,6 +30,7 @@
 ### Fixed
 
 - Shared public extensions no longer publish types with inaccessible type arguments, no longer drop setters for controls excluded from the publication filter, and no longer emit duplicate setters for declarative views (which are already public via the property/event generators). Overlapping independent publishers now report `SVCUIGEN008` while coverage propagated from a single publisher is accepted.
+- Generated `<see cref>` documentation for generic controls now uses XML documentation-ID syntax (`{...}` for type arguments) instead of raw C# angle brackets, which produced malformed XML (`CS1570`) for controls such as LiveCharts `XamlGaugeSeries<TVisual, TLabel>`.
 - The generator no longer emits instance event helpers for static public events, which previously produced invalid code (`CS0176`) for controls with static events such as `MarkdownRenderer.ConfigurePipeline`.
 - `ViewBase.Reload()` no longer accumulates styles produced by `BuildStyles()` on every rebuild; externally added styles are preserved.
 - Generated common-property setters now fully qualify Avalonia type names, avoiding `SVCSystems.Avalonia.Controls`/`.Media` resolution errors inside the library namespace.
