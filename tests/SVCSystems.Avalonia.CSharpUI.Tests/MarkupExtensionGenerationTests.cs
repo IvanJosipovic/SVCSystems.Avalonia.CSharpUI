@@ -20,28 +20,45 @@ public class MarkupExtensionGenerationTests
     [Fact]
     public void Compiled_fixture_extensions_match_the_pinned_amd_output()
     {
-        var assembly = typeof(MarkupExtensionGenerationTests).Assembly;
-        var generatedSourcesPath = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
-            .Single(static metadata => metadata.Key == "SVCSystems.CSharpUI.GeneratedSourcesPath")
-            .Value;
-        Assert.False(string.IsNullOrWhiteSpace(generatedSourcesPath));
-
-        var expectedSourcesPath = Path.Combine(AppContext.BaseDirectory, "TestData");
-        var expectedFiles = Directory.GetFiles(expectedSourcesPath, "*Extensions.cs");
+        var testDataPath = Path.Combine(AppContext.BaseDirectory, "TestData");
+        var expectedFiles = Directory.GetFiles(testDataPath, "*Extensions.cs");
         Assert.NotEmpty(expectedFiles);
+
+        // Run the generator in memory instead of reading EmitCompilerGeneratedFiles from disk:
+        // that path depends on the build configuration and can contain stale files on CI.
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var implicitUsings = CSharpSyntaxTree.ParseText(
+            "global using System;\nglobal using System.Collections.Generic;\nglobal using System.Linq;\nglobal using Avalonia;\nglobal using Avalonia.Controls;\nglobal using SVCSystems.Avalonia.CSharpUI;\n",
+            parseOptions,
+            cancellationToken: TestContext.Current.CancellationToken);
+        var fixtureTrees = Directory.GetFiles(testDataPath, "*.cs")
+            .Where(static path => !Path.GetFileName(path).EndsWith("Extensions.cs", StringComparison.Ordinal))
+            .Select(path => CSharpSyntaxTree.ParseText(
+                File.ReadAllText(path),
+                parseOptions,
+                cancellationToken: TestContext.Current.CancellationToken))
+            .Prepend(implicitUsings);
+        var compilation = CSharpCompilation.Create(
+            "FixtureControls",
+            fixtureTrees,
+            PlatformReferences,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+        var result = RunGenerator(compilation);
+        AssertNoErrors(result.OutputCompilation);
 
         foreach (var expectedFile in expectedFiles)
         {
             var fixtureName = Path.GetFileNameWithoutExtension(expectedFile);
             Assert.EndsWith("Extensions", fixtureName, StringComparison.Ordinal);
             var controlName = fixtureName[..^"Extensions".Length];
-            var generatedFileName = $"Local_Tests.{controlName}.g.cs";
-            var generatedFile = Assert.Single(Directory.GetFiles(
-                generatedSourcesPath!, generatedFileName, SearchOption.AllDirectories));
+            var generated = Assert.Single(result.GeneratedSources, source =>
+                source.Contains($"internal static partial class Tests_{controlName}_MarkupExtensions", StringComparison.Ordinal));
 
+            // Documentation comments depend on whether the host compilation retains doc comments;
+            // they have their own dedicated test. Compare the generated API shape only.
             Assert.Equal(
-                NormalizeGeneratedSource(File.ReadAllText(expectedFile)),
-                NormalizeGeneratedSource(File.ReadAllText(generatedFile)));
+                NormalizeIgnoringDocumentation(File.ReadAllText(expectedFile)),
+                NormalizeIgnoringDocumentation(generated));
         }
     }
 
@@ -445,6 +462,342 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
+    public void Constructed_generic_base_types_are_generated()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace GenericFixture
+            {
+                public class GenericBase<T> : Control
+                {
+                    public static readonly StyledProperty<int> ValueProperty =
+                        AvaloniaProperty.Register<GenericBase<T>, int>(nameof(Value));
+
+                    public int Value
+                    {
+                        get => GetValue(ValueProperty);
+                        set => SetValue(ValueProperty, value);
+                    }
+                }
+
+                public sealed class Derived : GenericBase<int> { }
+
+                public static class Usage
+                {
+                    public static Derived Create() => new Derived().Value(1);
+                }
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("GenericBaseFixture", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, static source =>
+            source.Contains("global::GenericFixture.GenericBase<global::System.Int32>", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Controls_with_transitive_avalonia_references_are_discovered()
+    {
+        var vendor = EmitReference(CreateCompilation("VendorControls", """
+            using Avalonia.Controls;
+
+            namespace Vendor { public class VendorBase : Control { } }
+            """));
+        var widgets = EmitReference(CreateCompilationWithReferences("WidgetControls", """
+            using Avalonia;
+            using Avalonia.Controls;
+            using Vendor;
+
+            namespace Widgets
+            {
+                public sealed class FancyControl : VendorBase
+                {
+                    public static readonly StyledProperty<int> ValueProperty =
+                        AvaloniaProperty.Register<FancyControl, int>(nameof(Value));
+
+                    public int Value
+                    {
+                        get => GetValue(ValueProperty);
+                        set => SetValue(ValueProperty, value);
+                    }
+                }
+            }
+            """, vendor));
+        var consumer = RunGenerator(CreateCompilationWithReferences("TransitiveConsumer", """
+            using Widgets;
+
+            public static class Usage
+            {
+                public static FancyControl Create() => new FancyControl();
+            }
+            """, widgets, vendor));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        Assert.Contains(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class Widgets_FancyControl_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Referenced_control_is_discovered_by_clr_name_when_it_has_a_factory_alias()
+    {
+        var library = EmitReference(CreateCompilation("AliasedControlLibrary", """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace AliasFixture;
+
+            [SVCSystemsCSharpUIGeneratorMetadata(Alias = "Badge")]
+            public sealed class LevelBadge : Control
+            {
+                public static readonly StyledProperty<int> LevelProperty =
+                    AvaloniaProperty.Register<LevelBadge, int>(nameof(Level));
+
+                public int Level
+                {
+                    get => GetValue(LevelProperty);
+                    set => SetValue(LevelProperty, value);
+                }
+            }
+            """));
+        var consumer = RunGenerator(CreateCompilationWithReferences("AliasedControlConsumer", """
+            using AliasFixture;
+
+            public static class Usage
+            {
+                public static LevelBadge Create() => new LevelBadge();
+            }
+            """, library));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        Assert.Contains(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class AliasFixture_LevelBadge_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Nested_control_types_are_generated()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+
+            namespace NestedFixture
+            {
+                public static class Outer
+                {
+                    public sealed class NestedControl : Control
+                    {
+                        public static readonly StyledProperty<int> ValueProperty =
+                            AvaloniaProperty.Register<NestedControl, int>(nameof(Value));
+
+                        public int Value
+                        {
+                            get => GetValue(ValueProperty);
+                            set => SetValue(ValueProperty, value);
+                        }
+                    }
+                }
+
+                public static class Usage
+                {
+                    public static object Create() => new Outer.NestedControl();
+                }
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("NestedControls", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, static source =>
+            source.Contains("internal static partial class NestedFixture_Outer_NestedControl_MarkupExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Inaccessible_type_does_not_produce_a_global_alias()
+    {
+        const string source = """
+            using Avalonia.Controls;
+
+            public static class Usage
+            {
+                private sealed class Button : Control { }
+
+                public static object Create() => new Button();
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("InaccessibleAlias", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
+        Assert.DoesNotContain(result.GeneratedSources, static generated =>
+            generated.Contains("global using Button =", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Global_namespace_member_does_not_produce_a_conflicting_alias()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+
+            public sealed class Widget : Control
+            {
+                public static readonly StyledProperty<int> ValueProperty =
+                    AvaloniaProperty.Register<Widget, int>(nameof(Value));
+
+                public int Value
+                {
+                    get => GetValue(ValueProperty);
+                    set => SetValue(ValueProperty, value);
+                }
+            }
+
+            public static class Usage
+            {
+                public static Widget Create() => new Widget();
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("GlobalNamespaceAlias", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
+        Assert.DoesNotContain(result.GeneratedSources, static generated =>
+            generated.Contains("global using Widget =", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Registrations_are_generated_despite_factory_name_collisions()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+
+            namespace One
+            {
+                public sealed class Shared : Control
+                {
+                    internal Shared() { }
+                    public static readonly StyledProperty<int> ValueProperty =
+                        AvaloniaProperty.Register<Shared, int>(nameof(Value));
+                    public int Value { get => GetValue(ValueProperty); set => SetValue(ValueProperty, value); }
+                }
+            }
+
+            namespace Two
+            {
+                public sealed class Shared : Control
+                {
+                    internal Shared() { }
+                    public static readonly StyledProperty<int> ValueProperty =
+                        AvaloniaProperty.Register<Shared, int>(nameof(Value));
+                    public int Value { get => GetValue(ValueProperty); set => SetValue(ValueProperty, value); }
+                }
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("RegistrationCollisions", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, static generated =>
+            generated.Contains("class One_Shared_ViewFactoryRegistration", StringComparison.Ordinal));
+        Assert.Contains(result.GeneratedSources, static generated =>
+            generated.Contains("class Two_Shared_ViewFactoryRegistration", StringComparison.Ordinal));
+    }
+
+    private static PortableExecutableReference CreateAttachedHostLibrary(string alias = "") =>
+        EmitReference(CreateCompilation("AttachedHostLibrary_" + alias, $$"""
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace AttachedHostFixture;
+
+            public sealed class HostControl : Control
+            {
+                {{alias}}public static readonly AttachedProperty<bool> DockProperty =
+                    AvaloniaProperty.RegisterAttached<HostControl, Control, bool>("Dock");
+
+                public static bool GetDock(AvaloniaObject element) => element.GetValue(DockProperty);
+                public static void SetDock(AvaloniaObject element, bool value) => element.SetValue(DockProperty, value);
+            }
+            """));
+
+    [Fact]
+    public void Attached_property_extension_name_roots_its_host()
+    {
+        var library = CreateAttachedHostLibrary();
+        var consumer = RunGenerator(CreateCompilationWithReferences("AttachedHostConsumer", """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static TextBlock Apply() => new TextBlock().HostControl_Dock(true);
+            }
+            """, library));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        var hostExtensions = Assert.Single(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class AttachedHostFixture_HostControl_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains("HostControl_Dock", hostExtensions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Aliased_attached_property_extension_name_roots_its_host()
+    {
+        var library = CreateAttachedHostLibrary("[SVCSystemsCSharpUIGeneratorMetadata(Alias = \"Pin\")]\n                ");
+        var consumer = RunGenerator(CreateCompilationWithReferences("AliasedAttachedHostConsumer", """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static TextBlock Apply() => new TextBlock().HostControl_Pin(true);
+            }
+            """, library));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        var hostExtensions = Assert.Single(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class AttachedHostFixture_HostControl_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains("HostControl_Pin", hostExtensions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Attached_property_on_static_host_is_generated()
+    {
+        var library = EmitReference(CreateCompilation("StaticAttachedHostLibrary", """
+            using Avalonia;
+            using Avalonia.Controls;
+
+            namespace StaticAttachedHostFixture;
+
+            public sealed class StaticHost
+            {
+                public static readonly AttachedProperty<bool> PinProperty =
+                    AvaloniaProperty.RegisterAttached<StaticHost, Control, bool>("Pin");
+
+                public static bool GetPin(AvaloniaObject element) => element.GetValue(PinProperty);
+                public static void SetPin(AvaloniaObject element, bool value) => element.SetValue(PinProperty, value);
+            }
+            """));
+        var consumer = RunGenerator(CreateCompilationWithReferences("StaticAttachedHostConsumer", """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static TextBlock Apply() => new TextBlock().StaticHost_Pin(true);
+            }
+            """, library));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        var hostExtensions = Assert.Single(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class StaticAttachedHostFixture_StaticHost_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains("StaticHost_Pin", hostExtensions, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Assembly_attribute_is_a_per_type_opt_in_for_unmentioned_controls()
     {
         var library = CreateExternalWidgetLibrary();
@@ -683,14 +1036,22 @@ public class MarkupExtensionGenerationTests
                 Path.Combine(referencePack, "ref", $"net{frameworkVersion.Major}.0"), "*.dll")
             .Select(static path => CreateReference(path));
 
-        // Use the reference assemblies from the NuGet cache: their XML documentation files sit
+        // Use the reference assemblies from the restored package: their XML documentation files sit
         // next to them, which lets in-memory generator tests exercise documented metadata symbols.
+        // The path comes from MSBuild so custom NUGET_PACKAGES/globalPackagesFolder setups work.
+        var packagePath = typeof(MarkupExtensionGenerationTests).Assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(metadata => metadata.Key == "SVCSystems.CSharpUI.AvaloniaPackagePath")
+            ?.Value;
         var version = typeof(Control).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!
             .InformationalVersion.Split('+')[0];
-        var avaloniaRefRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".nuget", "packages", "avalonia", version, "ref");
+        var avaloniaRefRoot = !string.IsNullOrWhiteSpace(packagePath)
+            ? Path.Combine(packagePath!, "ref")
+            : Path.Combine(
+                Environment.GetEnvironmentVariable("NUGET_PACKAGES")
+                    ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages"),
+                "avalonia", version, "ref");
         var avaloniaRefDirectory = new[] { $"net{frameworkVersion.Major}.0", "net10.0", "net8.0" }
             .Select(tfm => Path.Combine(avaloniaRefRoot, tfm))
             .First(Directory.Exists);
@@ -741,6 +1102,13 @@ public class MarkupExtensionGenerationTests
                 .Split('\n')
                 .Select(static line => line.TrimEnd()))
         .TrimEnd('\n');
+
+    private static string NormalizeIgnoringDocumentation(string source) =>
+        NormalizeGeneratedSource(string.Join(
+            "\n",
+            source.Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Split('\n')
+                .Where(static line => !line.TrimStart().StartsWith("///", StringComparison.Ordinal))));
 
     private static void AssertNoErrors(CSharpCompilation compilation)
     {

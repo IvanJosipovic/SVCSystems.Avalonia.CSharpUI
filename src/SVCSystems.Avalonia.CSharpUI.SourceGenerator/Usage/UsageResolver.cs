@@ -31,6 +31,22 @@ internal static class UsageResolver
 
         foreach (var name in names.Distinct(StringComparer.Ordinal))
         {
+            // An attached-property extension name (Host_Property) must root its host even when the
+            // host type is never mentioned, because the generated setter applies to any control.
+            if (catalog.TryGetAttachedPropertyHost(name, out var attachedHost))
+            {
+                if (attachedHost.IsOrInheritsFrom("Avalonia.AvaloniaObject"))
+                {
+                    AddWithClosure(attachedHost, keys);
+                }
+                else
+                {
+                    // Attached properties can live on a plain/static helper class. Such a host has
+                    // no Avalonia base chain, but its model still emits the attached setters.
+                    keys.Add(TypeKey.Create(attachedHost));
+                }
+            }
+
             var entries = catalog.Lookup(name);
             if (entries.Count == 0)
             {
@@ -43,15 +59,10 @@ internal static class UsageResolver
                 continue;
             }
 
-            var preferred = Prefer(entries);
-            if (preferred is not null)
-            {
-                AddWithClosure(preferred.Value.Symbol, keys);
-                continue;
-            }
-
-            // Safe superset: include every candidate, but never emit two extension classes with
-            // the same generated name (same namespace and type name in different assemblies).
+            // Include every candidate: preferring a local or Avalonia.Controls match would drop
+            // controls that source names explicitly (e.g. Vendor.Gauge with a local Other.Gauge).
+            // Never emit two extension classes with the same generated name (same namespace and
+            // type name in different assemblies).
             var emittedClassNames = new HashSet<string>(StringComparer.Ordinal);
             foreach (var entry in entries)
             {
@@ -71,20 +82,6 @@ internal static class UsageResolver
             .ToImmutableArray();
 
         return new UsageResult(ordered, ambiguous.ToImmutableArray());
-    }
-
-    private static ControlCatalog.CatalogEntry? Prefer(IReadOnlyList<ControlCatalog.CatalogEntry> entries)
-    {
-        var local = entries.Where(static entry => entry.IsLocal).ToArray();
-        if (local.Length == 1)
-        {
-            return local[0];
-        }
-
-        var avaloniaControls = entries
-            .Where(static entry => entry.Symbol.ContainingNamespace?.ToDisplayString() == "Avalonia.Controls")
-            .ToArray();
-        return avaloniaControls.Length == 1 ? avaloniaControls[0] : null;
     }
 
     private static void AddWithClosure(INamedTypeSymbol type, HashSet<TypeKey> keys)

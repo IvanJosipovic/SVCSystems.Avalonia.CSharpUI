@@ -20,7 +20,7 @@ var button = Button().Content("Save");
 
 ## Usage-driven generation
 
-Extensions, control factories and `ViewFactory` registrations are generated only for controls that the application uses. Usage is detected from source: factory calls (`Button()`), object creation (`new Button()`), type references, `typeof`, generic arguments and base lists. Controls declared in the current project are always included. The resolved set is then closed over base types, because fluent setters are emitted on the type that declares the Avalonia property — `Button().Margin(...)` needs `Layoutable` in the set.
+Extensions, control factories and `ViewFactory` registrations are generated only for controls that the application uses. Usage is detected from source: factory calls (`Button()`), object creation (`new Button()`), type references, `typeof`, generic arguments, base lists, and attached-property extension names (`Grid_Row(...)` roots `Grid`). Controls declared in the current project are always included. The resolved set is then closed over base types, because fluent setters are emitted on the type that declares the Avalonia property — `Button().Margin(...)` needs `Layoutable` in the set.
 
 A curated set of common Avalonia controls is generated unconditionally. This list is declared with `typeof(...)` in `[assembly: GenerateMarkupControl(...)]` in the runtime library, so it is compile-time checked; the generator reads it from metadata. The same assembly attribute can be applied in an application as a narrow per-type opt-in, for example to generate extensions for a control used only from compiled XAML in a referenced library.
 
