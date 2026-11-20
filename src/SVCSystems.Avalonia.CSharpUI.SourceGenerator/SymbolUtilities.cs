@@ -1,4 +1,3 @@
-using System.Collections.Immutable;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -9,50 +8,8 @@ internal static class SymbolUtilities
 {
     internal const string NewLine = "\n";
 
-    internal static string FormatXmlDoc(ISymbol? symbol)
-    {
-        if (symbol is null)
-        {
-            return string.Empty;
-        }
-
-        var xmlDoc = symbol.GetDocumentationCommentXml();
-        if (string.IsNullOrWhiteSpace(xmlDoc))
-        {
-            return string.Empty;
-        }
-
-        var lines = xmlDoc!
-            .Replace("\r\n", "\n")
-            .Replace('\r', '\n')
-            .Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-        var sb = new StringBuilder(xmlDoc.Length + (lines.Length * 5));
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0 ||
-                trimmed.StartsWith("<member", StringComparison.Ordinal) ||
-                trimmed.StartsWith("</member", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            sb.Append("/// ");
-            sb.Append(trimmed);
-            sb.Append(NewLine);
-        }
-
-        return sb.ToString();
-    }
-
-    private static readonly HashSet<string> AutoFrameworkAssemblies =
-    [
-        "Avalonia.Base",
-        "Avalonia.Controls",
-        "Avalonia.Markup",
-        "Avalonia.Themes.Fluent",
-    ];
+    internal static string FormatXmlDoc(ISymbol? symbol, Compilation? compilation = null) =>
+        DocumentationLookup.GetDocumentation(symbol, compilation);
 
     private static readonly SymbolDisplayFormat FullyQualifiedGlobalFormat =
         new(
@@ -65,121 +22,6 @@ internal static class SymbolUtilities
                 SymbolDisplayMiscellaneousOptions.EscapeKeywordIdentifiers |
                 SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier
         );
-
-    internal static ImmutableArray<TargetAssembly> GetTargetAssemblies(Compilation compilation)
-    {
-        var result = new Dictionary<IAssemblySymbol, bool>(SymbolEqualityComparer.Default);
-
-        AddAvaloniaTargets(compilation, result, generatePublicExtensions: false);
-
-        foreach (var attribute in compilation.Assembly.GetAttributes())
-        {
-            switch (attribute.AttributeClass?.ToDisplayString())
-            {
-                case "SVCSystems.Avalonia.CSharpUI.GenerateMarkupExtensionsForAssemblyAttribute":
-                    AddAssemblyAttributeTarget(result, attribute);
-                    break;
-                case "SVCSystems.Avalonia.CSharpUI.GenerateMarkupExtensionsForAvaloniaAttribute":
-                    AddAvaloniaTargets(compilation, result, HasGeneratePublicExtensions(attribute));
-                    break;
-            }
-        }
-
-        return [.. result
-            .OrderBy(static x => x.Key.Name)
-            .Select(static x => new TargetAssembly(x.Key, x.Value))];
-    }
-
-    private static void AddAssemblyAttributeTarget(
-        Dictionary<IAssemblySymbol, bool> targets,
-        AttributeData attribute)
-    {
-        if (attribute.ConstructorArguments.Length == 0 ||
-            attribute.ConstructorArguments[0].Value is not INamedTypeSymbol anchorType)
-        {
-            return;
-        }
-
-        AddTargetAssembly(targets, anchorType.ContainingAssembly, HasGeneratePublicExtensions(attribute));
-    }
-
-    private static void AddAvaloniaTargets(
-        Compilation compilation,
-        Dictionary<IAssemblySymbol, bool> targets,
-        bool generatePublicExtensions)
-    {
-        foreach (var reference in compilation.References)
-        {
-            if (compilation.GetAssemblyOrModuleSymbol(reference) is IAssemblySymbol assembly &&
-                AutoFrameworkAssemblies.Contains(assembly.Name))
-            {
-                AddTargetAssembly(targets, assembly, generatePublicExtensions);
-            }
-        }
-    }
-
-    private static void AddTargetAssembly(
-        Dictionary<IAssemblySymbol, bool> targets,
-        IAssemblySymbol assembly,
-        bool generatePublicExtensions)
-    {
-        if (targets.TryGetValue(assembly, out var existingValue))
-        {
-            targets[assembly] = existingValue || generatePublicExtensions;
-        }
-        else
-        {
-            targets.Add(assembly, generatePublicExtensions);
-        }
-    }
-
-    private static bool HasGeneratePublicExtensions(AttributeData attribute)
-    {
-        var parameterIndex = -1;
-        if (attribute.AttributeConstructor is { } constructor)
-        {
-            for (var index = 0; index < constructor.Parameters.Length; index++)
-            {
-                if (constructor.Parameters[index].Name == "generatePublicExtensions")
-                {
-                    parameterIndex = index;
-                    break;
-                }
-            }
-        }
-
-        return parameterIndex >= 0 &&
-            attribute.ConstructorArguments.Length > parameterIndex &&
-            attribute.ConstructorArguments[parameterIndex].Value is true;
-    }
-
-    internal readonly struct TargetAssembly(IAssemblySymbol assembly, bool generatePublicExtensions)
-    {
-        internal IAssemblySymbol Assembly { get; } = assembly;
-
-        internal bool GeneratePublicExtensions { get; } = generatePublicExtensions;
-    }
-
-    internal static IEnumerable<INamedTypeSymbol> GetPublicClasses(INamespaceSymbol sym)
-    {
-        foreach (var typeMember in sym.GetTypeMembers())
-        {
-            if (typeMember.DeclaredAccessibility == Accessibility.Public &&
-                typeMember.TypeKind == TypeKind.Class &&
-                !typeMember.IsGenericType)
-            {
-                yield return typeMember;
-            }
-        }
-
-        foreach (var namespaceMember in sym.GetNamespaceMembers())
-        {
-            foreach (var publicClass in GetPublicClasses(namespaceMember))
-            {
-                yield return publicClass;
-            }
-        }
-    }
 
     internal static IEnumerable<ISymbol> GetAllMembers(this INamedTypeSymbol type)
     {
@@ -345,8 +187,8 @@ internal static class SymbolUtilities
     internal static IPropertySymbol? GetBackingPropertySymbol(this IFieldSymbol field) =>
         field.ContainingType?.GetMembers(field.GetMemberName()).OfType<IPropertySymbol>().FirstOrDefault();
 
-    internal static string GetGeneratedXmlDoc(this IFieldSymbol field) =>
-        FormatXmlDoc((ISymbol?)field.GetBackingPropertySymbol() ?? field);
+    internal static string GetGeneratedXmlDoc(this IFieldSymbol field, Compilation? compilation = null) =>
+        FormatXmlDoc((ISymbol?)field.GetBackingPropertySymbol() ?? field, compilation);
 
     internal static string GetMemberName(this IFieldSymbol field)
     {

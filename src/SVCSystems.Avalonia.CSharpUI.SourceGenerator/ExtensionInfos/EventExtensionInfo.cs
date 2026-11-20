@@ -26,14 +26,14 @@ internal sealed class EventExtensionInfo : IMemberExtensionInfo
         EventParameterTypes[0] == "global::System.Object?" &&
         EventParameterTypes[1].Contains("EventArgs", StringComparison.Ordinal);
 
-    public EventExtensionInfo(IEventSymbol eventInfo, string? extensionName = null)
+    public EventExtensionInfo(IEventSymbol eventInfo, string? extensionName = null, Compilation? compilation = null)
     {
         ControlTypeName = eventInfo.ContainingType.GetFullTypeName();
         EventName = eventInfo.Name;
         ExtensionName = extensionName ?? eventInfo.Name;
         MemberName = EventName;
         EventHandler = eventInfo.Type.GetFullTypeName();
-        XmlDoc = SymbolUtilities.FormatXmlDoc(eventInfo);
+        XmlDoc = SymbolUtilities.FormatXmlDoc(eventInfo, compilation);
         IsObsolete = eventInfo.IsObsolete();
         IsRoutedEvent = IsRoutedEventSymbol(eventInfo);
         SupportsAddHandler = eventInfo.ContainingType.IsOrInheritsFrom("Avalonia.Interactivity.Interactive");

@@ -1,12 +1,7 @@
-using SVCSystems.Avalonia.CSharpUI.Samples.CustomControls.Controls;
-using SVCSystems.Avalonia.CSharpUI.Samples.CustomControls.Views;
-
-[assembly: GenerateMarkupExtensionsForAvalonia]
 
 var lifetime = new ClassicDesktopStyleApplicationLifetime
 {
-    Args = args,
-    ShutdownMode = ShutdownMode.OnLastWindowClose
+    Args = args
 };
 
 var appBuilder = AppBuilder.Configure<Application>()
@@ -19,7 +14,7 @@ var appBuilder = AppBuilder.Configure<Application>()
 
 lifetime.MainWindow = new Window
 {
-    Content = new MainView(),
+    Content = MainView(),
     Title = "CSharpUI Custom Controls Sample"
 };
 

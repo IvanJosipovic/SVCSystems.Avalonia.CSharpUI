@@ -8,10 +8,14 @@
 - Renamed `CSharpUIGeneratorMetadataAttribute` to `SVCSystemsCSharpUIGeneratorMetadataAttribute` and analyzer IDs `CSUIGEN###` to `SVCUIGEN###`.
 - Migrated the core package to Avalonia 12 and .NET 10/.NET 11.
 - Removed ReactiveUI-specific and legacy MVU APIs from the core library.
-- Removed the legacy `GenerateExtensionsForAssemblyAttribute`; use `GenerateMarkupExtensionsForAssemblyAttribute` instead.
+- Removed `GenerateExtensionsForAssemblyAttribute`, `GenerateMarkupExtensionsForAssemblyAttribute`, and `GenerateMarkupExtensionsForAvaloniaAttribute`. Generation is now usage-driven.
+- Generated extensions are always `internal` to the consuming compilation; libraries no longer publish public generated extensions, and diagnostic `SVCUIGEN001` was removed.
 
 ### Added
 
+- Added usage-driven generation: extensions, factories, and registrations are emitted only for controls mentioned in source plus their base-type closure. A curated, compile-time-checked `typeof(...)` list of common Avalonia controls is always generated (`GenerateMarkupControlAttribute`), and the same attribute in an application is a narrow per-type opt-in for controls used only from compiled XAML. Ambiguous control names report `SVCUIGEN006`; factory names that cannot be aliased report `SVCUIGEN007`.
+- Control factories are now imported globally by the generator, so `Button()` works in any source file without a `using static` directive. Generated type aliases keep same-named types usable (`Path.Combine`, `new Grid()`, etc.).
+- Generated extension classes, setters, bindings, events, style setters, and factory methods now carry XML documentation. Documentation for referenced controls is read from the XML files shipped beside the reference assemblies, since the compiler host does not attach them to metadata symbols.
 - Added a semantic control model for generated setters, bindings, events, attached properties, styles, factories, and view-factory registrations.
 - Added generated control factories with source file, line, view, and control metadata.
 - Added runtime diagnostics and external assembly generation checks.

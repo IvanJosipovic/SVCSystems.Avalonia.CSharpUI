@@ -36,8 +36,7 @@ internal sealed class PropertyModel(
     ITypeSymbol valueType,
     PropertyInheritanceKind inheritanceKind,
     AvaloniaPropertyOwnershipKind ownershipKind,
-    bool isIgnored,
-    bool isContentSlot)
+    bool isIgnored)
 {
     internal string Name { get; } = name;
 
@@ -57,8 +56,6 @@ internal sealed class PropertyModel(
 
     internal bool IsIgnored { get; } = isIgnored;
 
-    internal bool IsContentSlot { get; } = isContentSlot;
-
     internal bool CanRead => ClrProperty?.GetMethod?.DeclaredAccessibility == Accessibility.Public;
 
     internal bool CanWrite => ClrProperty?.SetMethod?.DeclaredAccessibility == Accessibility.Public;
@@ -76,8 +73,7 @@ internal sealed class PropertyModel(
         ValueType,
         PropertyInheritanceKind.Inherited,
         AvaloniaPropertyOwnershipKind.Inherited,
-        IsIgnored,
-        IsContentSlot);
+        IsIgnored);
 }
 
 internal sealed class EventModel(
@@ -130,15 +126,6 @@ internal sealed class AttachedPropertyModel(
         IsIgnored);
 }
 
-internal sealed class ContentSlotModel(IPropertySymbol property)
-{
-    internal IPropertySymbol Property { get; } = property;
-
-    internal string Name => Property.Name;
-
-    internal ITypeSymbol ValueType => Property.Type;
-}
-
 internal sealed class ControlModel(
     INamedTypeSymbol type,
     ControlModel? baseType,
@@ -150,7 +137,6 @@ internal sealed class ControlModel(
     IReadOnlyList<AttachedPropertyModel> declaredAttachedProperties,
     IReadOnlyList<AttachedPropertyModel> attachedProperties,
     IReadOnlyList<IFieldSymbol> stylePropertyFields,
-    IReadOnlyList<ContentSlotModel> contentSlots,
     bool ignoreGeneratedExtensions,
     bool generateFactory,
     string factoryName)
@@ -180,8 +166,6 @@ internal sealed class ControlModel(
     internal IReadOnlyList<AttachedPropertyModel> AttachedProperties { get; } = attachedProperties;
 
     internal IReadOnlyList<IFieldSymbol> StylePropertyFields { get; } = stylePropertyFields;
-
-    internal IReadOnlyList<ContentSlotModel> ContentSlots { get; } = contentSlots;
 
     internal bool IgnoreGeneratedExtensions { get; } = ignoreGeneratedExtensions;
 

@@ -19,8 +19,6 @@ dotnet add package SVCSystems.Avalonia.CSharpUI
 ## A view with typed bindings
 
 ```csharp
-using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;
-
 public sealed class GreetingView(GreetingViewModel viewModel) : ViewBase<GreetingViewModel>(viewModel)
 {
     protected override object Build(GreetingViewModel vm) =>
@@ -38,7 +36,9 @@ public sealed class GreetingView(GreetingViewModel viewModel) : ViewBase<Greetin
 }
 ```
 
-Generated factory methods create ordinary Avalonia controls and attach their call-site file, line, view type, and control type as source metadata. Import `GeneratedControlFactories` explicitly in files that use the factory syntax. Generated fluent extension methods are produced for Avalonia controls and can also be generated for controls in other assemblies.
+Generated factory methods create ordinary Avalonia controls and attach their call-site file, line, view type, and control type as source metadata. No `using static` directive is needed: the generator emits a global static import and the type aliases needed to keep names like `Path.Combine` and `new Grid()` working, so `Button()` works in any source file.
+
+Generation is usage-driven: extensions, factories, and registrations are emitted only for controls mentioned in your source (plus their base types) and for a curated list of common Avalonia controls declared with `typeof(...)` in the library. Controls in referenced assemblies are discovered by name without extra attributes. See [the architecture guide](docs/architecture.md) for details.
 
 `SVCSystemsCSharpUIGeneratorMetadataAttribute` can rename generated APIs, suppress generated members or factories, and mark a property as a content slot. For example, `[SVCSystemsCSharpUIGeneratorMetadata(Alias = "Caption")]` renames the generated fluent setter while keeping the underlying Avalonia property unchanged.
 

@@ -328,7 +328,7 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
             {
                 AppendSignaturePart(signature, fieldSymbol.Type.GetFullTypeName());
                 AppendSignaturePart(signature, fieldSymbol.Type.GetLastGenericArgument().GetFullTypeName());
-                AppendSignaturePart(signature, fieldSymbol.GetGeneratedXmlDoc());
+                AppendSignaturePart(signature, fieldSymbol.GetGeneratedXmlDoc(semanticModel.Compilation));
             }
         }
     }
@@ -357,7 +357,7 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
         if (semanticModel.GetDeclaredSymbol(property) is IPropertySymbol propertySymbol)
         {
             AppendSignaturePart(signature, propertySymbol.Type.GetFullTypeName());
-            AppendSignaturePart(signature, SymbolUtilities.FormatXmlDoc(propertySymbol));
+            AppendSignaturePart(signature, SymbolUtilities.FormatXmlDoc(propertySymbol, semanticModel.Compilation));
         }
     }
 
@@ -483,13 +483,13 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
         }
 
         return semanticModel.GetDeclaredSymbol(variable) is IFieldSymbol fieldSymbol
-            ? fieldSymbol.GetGeneratedXmlDoc()
+            ? fieldSymbol.GetGeneratedXmlDoc(semanticModel.Compilation)
             : string.Empty;
     }
 
     private static string GetPropertyXmlDoc(PropertyDeclarationSyntax property, SemanticModel semanticModel) =>
         semanticModel.GetDeclaredSymbol(property) is IPropertySymbol propertySymbol
-            ? SymbolUtilities.FormatXmlDoc(propertySymbol)
+            ? SymbolUtilities.FormatXmlDoc(propertySymbol, semanticModel.Compilation)
             : string.Empty;
 
     public static string GetPropertySetterExtension(string controlTypeName, string genericParamsAll, FieldDeclarationSyntax field, SemanticModel semanticModel)

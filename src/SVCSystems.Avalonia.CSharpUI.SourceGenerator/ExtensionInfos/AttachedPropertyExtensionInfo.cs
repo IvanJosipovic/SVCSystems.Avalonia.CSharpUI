@@ -8,8 +8,8 @@ internal sealed class AttachedPropertyExtensionInfo : PropertyExtensionInfo
 {
     public string? AttachedPropertyHostTypeName { get; }
 
-    public AttachedPropertyExtensionInfo(IFieldSymbol field, string? extensionName = null)
-        : base(field, extensionName)
+    public AttachedPropertyExtensionInfo(IFieldSymbol field, string? extensionName = null, Compilation? compilation = null)
+        : base(field, extensionName, compilation)
     {
         ExtensionName = $"{field.ContainingType.Name.Split('`')[0]}_{ExtensionName}";
 

@@ -20,7 +20,7 @@ internal class PropertyExtensionInfo : IMemberExtensionInfo
     public string StyleGenericConstraint { get; protected set; } = "";
     public string GenericArg { get; protected set; } = "";
 
-    public PropertyExtensionInfo(IFieldSymbol field, string? extensionName = null)
+    public PropertyExtensionInfo(IFieldSymbol field, string? extensionName = null, Compilation? compilation = null)
     {
         FieldSymbol = field;
         ControlType = field.ContainingType ?? throw new NullReferenceException("Control type can not be NULL");
@@ -29,7 +29,7 @@ internal class PropertyExtensionInfo : IMemberExtensionInfo
         ValueType = field.Type.GetLastGenericArgument();
         ControlTypeName = ControlType.GetFullTypeName();
         ValueTypeSource = ValueType.GetFullTypeName();
-        XmlDoc = field.GetGeneratedXmlDoc();
+        XmlDoc = field.GetGeneratedXmlDoc(compilation);
 
         IsGeneric = !ControlType.IsSealed;
         ReturnType = ControlTypeName;

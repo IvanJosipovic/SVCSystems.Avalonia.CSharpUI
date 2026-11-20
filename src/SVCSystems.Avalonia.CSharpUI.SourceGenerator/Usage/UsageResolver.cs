@@ -1,0 +1,104 @@
+using System.Collections.Immutable;
+using Microsoft.CodeAnalysis;
+
+namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
+
+/// <summary>
+/// Maps simple names from source to control types and closes the result over base types.
+/// Base-type closure is required because fluent setters are emitted on the type that declares
+/// the Avalonia property: Button().Margin(...) needs an extension on Layoutable, which is a
+/// base type of Button.
+/// </summary>
+internal static class UsageResolver
+{
+    internal static UsageResult Resolve(ControlCatalog catalog, ImmutableArray<string> names)
+    {
+        var keys = new HashSet<TypeKey>();
+        var ambiguous = new SortedSet<string>(StringComparer.Ordinal);
+
+        // Common Avalonia controls are always available, even when usage detection cannot see
+        // them (compiled XAML, reflection, runtime-composed views).
+        foreach (var type in catalog.CommonTypes())
+        {
+            AddWithClosure(type, keys);
+        }
+
+        // Local controls belong to the application itself, so their declarations are roots.
+        foreach (var entry in catalog.LocalEntries)
+        {
+            AddWithClosure(entry.Symbol, keys);
+        }
+
+        foreach (var name in names.Distinct(StringComparer.Ordinal))
+        {
+            var entries = catalog.Lookup(name);
+            if (entries.Count == 0)
+            {
+                continue;
+            }
+
+            if (entries.Count == 1)
+            {
+                AddWithClosure(entries[0].Symbol, keys);
+                continue;
+            }
+
+            var preferred = Prefer(entries);
+            if (preferred is not null)
+            {
+                AddWithClosure(preferred.Value.Symbol, keys);
+                continue;
+            }
+
+            // Safe superset: include every candidate, but never emit two extension classes with
+            // the same generated name (same namespace and type name in different assemblies).
+            var emittedClassNames = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var entry in entries)
+            {
+                var extensionClassName = SymbolUtilities.BuildExtensionClassName(entry.Symbol);
+                if (emittedClassNames.Add(extensionClassName))
+                {
+                    AddWithClosure(entry.Symbol, keys);
+                }
+            }
+
+            ambiguous.Add(name);
+        }
+
+        var ordered = keys
+            .OrderBy(static key => key.AssemblyName, StringComparer.Ordinal)
+            .ThenBy(static key => key.TypeName, StringComparer.Ordinal)
+            .ToImmutableArray();
+
+        return new UsageResult(ordered, ambiguous.ToImmutableArray());
+    }
+
+    private static ControlCatalog.CatalogEntry? Prefer(IReadOnlyList<ControlCatalog.CatalogEntry> entries)
+    {
+        var local = entries.Where(static entry => entry.IsLocal).ToArray();
+        if (local.Length == 1)
+        {
+            return local[0];
+        }
+
+        var avaloniaControls = entries
+            .Where(static entry => entry.Symbol.ContainingNamespace?.ToDisplayString() == "Avalonia.Controls")
+            .ToArray();
+        return avaloniaControls.Length == 1 ? avaloniaControls[0] : null;
+    }
+
+    private static void AddWithClosure(INamedTypeSymbol type, HashSet<TypeKey> keys)
+    {
+        INamedTypeSymbol? current = type;
+        while (current is not null && current.SpecialType != SpecialType.System_Object)
+        {
+            if (current.IsOrInheritsFrom("Avalonia.AvaloniaObject") &&
+                current.IsAccessibleFromGeneratedCode())
+            {
+                keys.Add(TypeKey.Create(current));
+            }
+
+            current = current.BaseType;
+        }
+    }
+}

@@ -14,12 +14,9 @@ public sealed class Generator : IIncrementalGenerator
 {
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        new ExternalAssemblyExtensionsGenerator().Initialize(context);
-        new LocalControlExtensionsGenerator().Initialize(context);
+        new UsageDrivenMarkupGenerator().Initialize(context);
         new AvaloniaPropertyExtensionsGenerator().Initialize(context);
         new AvaloniaEventExtensionsGenerator().Initialize(context);
-        new ViewFactoryRegistrationGenerator().Initialize(context);
-        new ControlFactoryGenerator().Initialize(context);
         new XamlResourceGenerator().Initialize(context);
 
         context.RegisterPostInitializationOutput(static output => output.AddSource(
@@ -28,5 +25,7 @@ public sealed class Generator : IIncrementalGenerator
                 "global using SVCSystems.Avalonia.CSharpUI;\n" +
                 "global using SVCSystems.Avalonia.CSharpUI.CommonExtensions;\n",
                 Encoding.UTF8)));
+        // The global static factory import and its type aliases are emitted by
+        // UsageDrivenMarkupGenerator after the used control set is known.
     }
 }
