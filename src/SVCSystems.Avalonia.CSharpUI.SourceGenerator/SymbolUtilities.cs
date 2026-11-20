@@ -209,20 +209,9 @@ internal static class SymbolUtilities
     /// </summary>
     internal static string GetCrefName(INamedTypeSymbol type)
     {
-        var prefix = type.ContainingType is not null
-            ? GetCrefName(type.ContainingType) + "."
-            : type.ContainingNamespace is { IsGlobalNamespace: false } ns
-                ? "global::" + ns.ToDisplayString() + "."
-                : "global::";
-
-        if (type.TypeArguments.Length == 0)
-        {
-            return prefix + type.Name;
-        }
-
-        var arguments = string.Join(",", type.TypeArguments.Select(argument =>
-            argument is INamedTypeSymbol named ? GetCrefName(named) : argument.GetFullTypeName()));
-        return $"{prefix}{type.Name}{{{arguments}}}";
+        return type.GetFullTypeName()
+            .Replace('<', '{')
+            .Replace('>', '}');
     }
 
     internal static string GetFullTypeName(this ITypeSymbol symbol)
