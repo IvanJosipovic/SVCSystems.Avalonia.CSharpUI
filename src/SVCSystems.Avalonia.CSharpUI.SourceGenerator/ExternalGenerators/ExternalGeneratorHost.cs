@@ -88,13 +88,15 @@ internal sealed class ExternalGeneratorHost
     public string? GenerateExtensions(
         INamedTypeSymbol controlType,
         Compilation? compilation = null,
-        bool publish = false)
-        => GenerateExtensions(ControlModelBuilder.Build(controlType), compilation, publish);
+        bool publish = false,
+        bool suppressOverlappingSetters = false)
+        => GenerateExtensions(ControlModelBuilder.Build(controlType), compilation, publish, suppressOverlappingSetters);
 
     internal string? GenerateExtensions(
         ControlModel controlModel,
         Compilation? compilation = null,
-        bool publish = false)
+        bool publish = false,
+        bool suppressOverlappingSetters = false)
     {
         if (controlModel.IgnoreGeneratedExtensions)
         {
@@ -105,7 +107,7 @@ internal sealed class ExternalGeneratorHost
 
         foreach (var groupGenerator in _groupGenerators)
         {
-            var extensions = groupGenerator.Generate(controlModel, compilation, out var generatedCount);
+            var extensions = groupGenerator.Generate(controlModel, compilation, suppressOverlappingSetters, out var generatedCount);
             if (generatedCount == 0 || string.IsNullOrWhiteSpace(extensions))
             {
                 continue;

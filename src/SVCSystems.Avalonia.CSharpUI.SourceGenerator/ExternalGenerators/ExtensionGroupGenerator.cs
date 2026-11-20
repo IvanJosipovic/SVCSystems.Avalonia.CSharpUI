@@ -12,7 +12,11 @@ internal sealed class ExtensionGroupGenerator(
 {
     public string GroupName { get; } = groupName;
 
-    public string? Generate(ControlModel controlModel, Compilation? compilation, out int generationsCount)
+    public string? Generate(
+        ControlModel controlModel,
+        Compilation? compilation,
+        bool suppressOverlappingSetters,
+        out int generationsCount)
     {
         generationsCount = 0;
 
@@ -22,6 +26,11 @@ internal sealed class ExtensionGroupGenerator(
             sb.AppendLine($" // {extensionInfo.MemberName}");
             foreach (var generator in generators)
             {
+                if (suppressOverlappingSetters && generator.OverlapsWithDeclarativeGenerators)
+                {
+                    continue;
+                }
+
                 var extensionCode = generator.GetExtension(extensionInfo);
                 if (string.IsNullOrWhiteSpace(extensionCode))
                 {

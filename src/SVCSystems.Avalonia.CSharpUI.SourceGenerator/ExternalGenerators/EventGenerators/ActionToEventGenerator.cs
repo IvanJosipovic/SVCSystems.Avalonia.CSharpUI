@@ -4,6 +4,8 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.EventG
 
 internal sealed class ActionToEventGenerator : ExtensionGeneratorBase<EventExtensionInfo>
 {
+    internal override bool OverlapsWithDeclarativeGenerators => true;
+
     protected override string GetExtension(EventExtensionInfo @event)
     {
         var obsolete = @event.IsObsolete ? "[Obsolete]" + SymbolUtilities.NewLine : string.Empty;

@@ -281,22 +281,18 @@ public sealed class UsageDrivenMarkupGenerator
                 continue;
             }
 
-            // AvaloniaPropertyExtensionsGenerator and AvaloniaEventExtensionsGenerator already emit
-            // public setters for declarative views. A second overload set here would be ambiguous
-            // both locally and for consumers, published or not. Factories and registrations below
-            // still use this model.
-            if (MarkupTypeHelpers.IsAvaloniaMarkupView(model.Type))
-            {
-                continue;
-            }
-
             try
             {
                 var typeKey = TypeKey.Create(model.Type);
                 var publish = publishing.IsPublisher &&
                     (publishing.RestrictedRoots is null || publishing.RestrictedRoots.Contains(typeKey)) &&
                     ExternalGeneratorHost.CanPublish(model.Type);
-                var code = host.GenerateExtensions(model, compilation, publish);
+
+                // Declarative views already get public value/binding-expression and event setters
+                // from the dedicated generators. Suppress just those overloads; the BindingBase and
+                // Style<T> setters below are not emitted anywhere else and must remain available.
+                var suppressOverlappingSetters = MarkupTypeHelpers.IsAvaloniaMarkupView(model.Type);
+                var code = host.GenerateExtensions(model, compilation, publish, suppressOverlappingSetters);
                 if (string.IsNullOrWhiteSpace(code))
                 {
                     continue;

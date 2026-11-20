@@ -19,4 +19,11 @@ internal abstract class ExtensionGeneratorBase
         string.IsNullOrEmpty(xmlDoc) ? extensionCode : xmlDoc + extensionCode;
 
     public abstract string? GetExtension(IMemberExtensionInfo info);
+
+    /// <summary>
+    /// Whether this generator emits an overload that AvaloniaPropertyExtensionsGenerator or
+    /// AvaloniaEventExtensionsGenerator already emits publicly for declarative views. Such
+    /// overloads are suppressed for views so consumers never see two applicable public setters.
+    /// </summary>
+    internal virtual bool OverlapsWithDeclarativeGenerators => false;
 }
