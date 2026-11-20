@@ -3,7 +3,7 @@
 Status: **implemented**
 Applies to: `SVCSystems.Avalonia.CSharpUI.SourceGenerator`
 
-Implementation notes: the curated common-control list is a `typeof(...)` assembly attribute (`GenerateMarkupControlAttribute`) in the runtime library, because the `netstandard2.0` generator cannot reference Avalonia 12 (net8.0/net10.0 only). The same attribute can be applied in the consuming assembly as a narrow per-type opt-in. The legacy `GenerateMarkupExtensionsFor*` attributes and public-extension publishing are removed. **234 tests pass** (117 per target framework) on net10.0 and net11.0.
+Implementation notes: the curated common-control list is a `typeof(...)` assembly attribute (`GenerateMarkupControlAttribute`) in the runtime library, because the `netstandard2.0` generator cannot reference Avalonia 12 (net8.0/net10.0 only). The same attribute can be applied in the consuming assembly as a narrow per-type opt-in. The legacy `GenerateMarkupExtensionsFor*` attributes and public-extension publishing are removed. **248 tests pass** (124 per target framework) on net10.0 and net11.0.
 
 ## Decisions (confirmed)
 
@@ -129,7 +129,7 @@ The library is in alpha, so these breaking changes (public attributes removed, g
 
 ## 5. Verification
 
-- `dotnet build` and `dotnet test`: green on net10.0/net11.0, **234/234 tests**.
+- `dotnet build` and `dotnet test`: green on net10.0/net11.0, **248/248 tests**.
 - Generated sources in the test project: **202 → 70** external extension files (258 → 170 total generated files).
 - Measured full-solution builds (two runs each, HEAD worktree vs current tree):
 
@@ -151,6 +151,19 @@ The three samples compile and run with no generation attributes; inherited sette
 | Metadata docs unavailable in compiler host | `DocumentationLookup` reads the XML beside each reference, cached at three levels. |
 | Breaking change for consumers | Alpha library — breaking changes are acceptable; recorded in `CHANGELOG.md`. |
 | Stale generated files when usage is removed | Source output emits the full set each run; Roslyn drops files not re-added. |
+
+## 6b. Review hardening
+
+Follow-up from PR review:
+
+- The catalog records base-type symbols, so constructed generic bases (`Derived : GenericBase<int>`) resolve to real symbols and get their setters generated; open definitions are suppressed when a constructed counterpart exists.
+- Referenced assemblies are discovered through transitive Avalonia references, nested control types are enumerated, and referenced controls are indexed by both factory alias and CLR name.
+- Attached-property hosts are rooted from generated extension names (`Host_Property`), including non-control hosts.
+- Name collisions now keep all distinct candidates instead of preferring one.
+- Global aliases are skipped (with `SVCUIGEN007`) for inaccessible types, generic containers, user aliases, multiple resolved types, and global namespace conflicts.
+- `ViewFactory` registrations are emitted for every eligible control even when factory names collide.
+- Generation result is equatable and registered as the source-output input, so Roslyn caches unchanged files across edits.
+- Generator tests resolve the Avalonia reference path from MSBuild instead of a hard-coded NuGet cache.
 
 ## 7. Remaining work
 

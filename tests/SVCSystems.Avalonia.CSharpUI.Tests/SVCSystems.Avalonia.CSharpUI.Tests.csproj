@@ -21,6 +21,7 @@
   <ItemGroup>
     <Using Include="Xunit" />
     <AssemblyMetadata Include="SVCSystems.CSharpUI.GeneratedSourcesPath" Value="$(CompilerGeneratedFilesOutputPath)" />
+    <AssemblyMetadata Include="SVCSystems.CSharpUI.AvaloniaPackagePath" Value="$(PkgAvalonia)" />
   </ItemGroup>
 
   <ItemGroup>
