@@ -28,5 +28,6 @@
 
 ### Fixed
 
+- The generator no longer emits instance event helpers for static public events, which previously produced invalid code (`CS0176`) for controls with static events such as `MarkdownRenderer.ConfigurePipeline`.
 - `ViewBase.Reload()` no longer accumulates styles produced by `BuildStyles()` on every rebuild; externally added styles are preserved.
 - Generated common-property setters now fully qualify Avalonia type names, avoiding `SVCSystems.Avalonia.Controls`/`.Media` resolution errors inside the library namespace.
