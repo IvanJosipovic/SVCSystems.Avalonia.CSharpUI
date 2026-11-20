@@ -176,6 +176,26 @@ public sealed class UsageDrivenMarkupGenerator
 
         var catalog = ControlCatalog.Build(compilation);
         var usage = UsageResolver.Resolve(catalog, names);
+        var publishing = ExtensionPublishing.Read(compilation);
+
+        // Controls whose extensions are already public in a referenced assembly are removed from
+        // this compilation's local generation. That keeps friend assemblies from seeing duplicate
+        // internal extension methods and avoids recompiling the same generated APIs in each project.
+        var extensionKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var key in usage.Keys)
+        {
+            if (publishing.RestrictedRoots is not null && !publishing.RestrictedRoots.Contains(key))
+            {
+                continue;
+            }
+
+            if (publishing.ReferencedCoverage.Contains(key.ToString()))
+            {
+                continue;
+            }
+
+            extensionKeys.Add(key.ToString());
+        }
 
         foreach (var ambiguousName in usage.AmbiguousNames)
         {
@@ -187,6 +207,7 @@ public sealed class UsageDrivenMarkupGenerator
 
         var cache = new Dictionary<INamedTypeSymbol, ControlModel>(SymbolEqualityComparer.Default);
         var models = new List<ControlModel>();
+        var publishedKeys = new HashSet<string>(publishing.ReferencedCoverage, StringComparer.Ordinal);
         foreach (var key in usage.Keys)
         {
             if (!catalog.TryGetByKey(key, out var symbol))
@@ -234,12 +255,23 @@ public sealed class UsageDrivenMarkupGenerator
         var host = new ExternalGeneratorHost();
         foreach (var model in models)
         {
+            if (!extensionKeys.Contains(TypeKey.Create(model.Type).ToString()))
+            {
+                continue;
+            }
+
             try
             {
-                var code = host.GenerateExtensions(model, compilation);
+                var publish = publishing.IsPublisher && ExternalGeneratorHost.CanPublish(model.Type);
+                var code = host.GenerateExtensions(model, compilation, publish);
                 if (string.IsNullOrWhiteSpace(code))
                 {
                     continue;
+                }
+
+                if (publish)
+                {
+                    publishedKeys.Add(TypeKey.Create(model.Type).ToString());
                 }
 
                 var typeName = model.Type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
@@ -259,6 +291,13 @@ public sealed class UsageDrivenMarkupGenerator
         GenerateFactoryUsings(sources, diagnostics, compilation, factoryTargets);
         GenerateFactories(sources, compilation, factoryTargets);
         GenerateRegistrations(sources, GetRegistrationTargets(models));
+
+        if (publishing.IsPublisher)
+        {
+            sources.Add(new GeneratedSource(
+                "PublicMarkupExtensionControls.g.cs",
+                ExtensionPublishing.CreateCoverageSource(publishedKeys)));
+        }
 
         return new GenerationResult(sources.ToImmutableArray(), diagnostics.ToImmutableArray());
     }

@@ -107,6 +107,81 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
+    public void Publishing_assembly_generates_public_extensions_and_coverage_metadata()
+    {
+        var result = RunGenerator(CreateCompilation("Publisher", CreateSource(
+            "[assembly: SVCSystems.Avalonia.CSharpUI.GeneratePublicMarkupExtensions]",
+            string.Empty)));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, source =>
+            source.Contains(
+                $"public static partial class {FixtureNamespace}_FixtureControl_MarkupExtensions",
+                StringComparison.Ordinal));
+        var coverage = Assert.Single(result.GeneratedSources, source =>
+            source.Contains("PublicMarkupExtensionControlsAttribute", StringComparison.Ordinal));
+        Assert.Contains(
+            $"Publisher|{FixtureNamespace}.FixtureControl",
+            coverage,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Consumer_reuses_published_extensions_without_regenerating_them()
+    {
+        var publisher = RunGenerator(CreateCompilation("Publisher", CreateSource(
+            "[assembly: SVCSystems.Avalonia.CSharpUI.GeneratePublicMarkupExtensions]",
+            string.Empty)));
+        AssertNoErrors(publisher.OutputCompilation);
+
+        const string source = """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static Button Create() => new Button().Width(120);
+            }
+            """;
+        var consumer = RunGenerator(CreateCompilationWithReferences(
+            "Consumer",
+            source,
+            EmitReference(publisher.OutputCompilation)));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        Assert.DoesNotContain(consumer.GeneratedSources, generated =>
+            generated.Contains("Avalonia_Controls_Button_MarkupExtensions", StringComparison.Ordinal));
+
+        // Factories stay local so the consumer can still create the control by its factory name.
+        var factories = Assert.Single(consumer.GeneratedSources, generated =>
+            generated.Contains("internal static class GeneratedControlFactories", StringComparison.Ordinal));
+        Assert.Contains(" Button(", factories, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Explicit_publication_filter_limits_published_controls()
+    {
+        const string source = """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            [assembly: GeneratePublicMarkupExtensions(typeof(Button))]
+
+            public static class Usage
+            {
+                public static TextBlock Create() => new TextBlock { Text = "x" };
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("FilteredPublisher", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        var coverage = Assert.Single(result.GeneratedSources, generated =>
+            generated.Contains("PublicMarkupExtensionControlsAttribute", StringComparison.Ordinal));
+        Assert.Contains("Avalonia.Controls.Button", coverage, StringComparison.Ordinal);
+        Assert.DoesNotContain("Avalonia.Controls.TextBlock", coverage, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Common_controls_are_generated_without_being_mentioned_in_source()
     {
         var result = RunGenerator(CreateCompilation("CommonControls", "using Avalonia.Controls;"));
