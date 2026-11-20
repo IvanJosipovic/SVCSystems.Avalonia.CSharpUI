@@ -11,17 +11,20 @@ internal sealed class ControlCatalog
 {
     private readonly Dictionary<string, List<CatalogEntry>> _byFactoryName;
     private readonly Dictionary<TypeKey, INamedTypeSymbol> _byKey;
+    private readonly Dictionary<string, INamedTypeSymbol> _attachedHostsByName;
     private readonly List<CatalogEntry> _localEntries;
     private readonly HashSet<string> _commonTypeNames;
 
     private ControlCatalog(
         Dictionary<string, List<CatalogEntry>> byFactoryName,
         Dictionary<TypeKey, INamedTypeSymbol> byKey,
+        Dictionary<string, INamedTypeSymbol> attachedHostsByName,
         List<CatalogEntry> localEntries,
         HashSet<string> commonTypeNames)
     {
         _byFactoryName = byFactoryName;
         _byKey = byKey;
+        _attachedHostsByName = attachedHostsByName;
         _localEntries = localEntries;
         _commonTypeNames = commonTypeNames;
     }
@@ -46,11 +49,13 @@ internal sealed class ControlCatalog
     {
         var byFactoryName = new Dictionary<string, List<CatalogEntry>>(StringComparer.Ordinal);
         var byKey = new Dictionary<TypeKey, INamedTypeSymbol>();
+        var attachedHostsByName = new Dictionary<string, INamedTypeSymbol>(StringComparer.Ordinal);
         var localEntries = new List<CatalogEntry>();
         var localAssembly = compilation.Assembly;
 
         foreach (var type in EnumerateClasses(localAssembly.GlobalNamespace, publicOnly: false, skipGeneric: false))
         {
+            AddAttachedHostIndex(type, byKey, attachedHostsByName);
             Add(type, isLocal: true, byFactoryName, byKey, localEntries);
         }
 
@@ -65,17 +70,26 @@ internal sealed class ControlCatalog
 
             foreach (var type in EnumerateClasses(assembly.GlobalNamespace, publicOnly: true, skipGeneric: true))
             {
+                AddAttachedHostIndex(type, byKey, attachedHostsByName);
                 Add(type, isLocal: false, byFactoryName, byKey, localEntries);
             }
         }
 
-        return new ControlCatalog(byFactoryName, byKey, localEntries, CommonControls.GetTypeNames(compilation));
+        return new ControlCatalog(byFactoryName, byKey, attachedHostsByName, localEntries, CommonControls.GetTypeNames(compilation));
     }
 
     internal IReadOnlyList<CatalogEntry> Lookup(string factoryName) =>
         _byFactoryName.TryGetValue(factoryName, out var entries) ? entries : Array.Empty<CatalogEntry>();
 
     internal bool TryGetByKey(TypeKey key, out INamedTypeSymbol symbol) => _byKey.TryGetValue(key, out symbol!);
+
+    /// <summary>
+    /// Resolves a generated attached-property extension name (Host_Property) back to the type that
+    /// hosts the Avalonia attached property. Attached setters apply to any control, so using one in
+    /// source must bring its host into the generation set.
+    /// </summary>
+    internal bool TryGetAttachedPropertyHost(string extensionName, out INamedTypeSymbol host) =>
+        _attachedHostsByName.TryGetValue(extensionName, out host!);
 
     private static void Add(
         INamedTypeSymbol type,
@@ -112,6 +126,48 @@ internal sealed class ControlCatalog
         if (isLocal)
         {
             localEntries.Add(entry);
+        }
+    }
+
+    /// <summary>
+    /// Indexes attached-property extension names (Host_Property) so a call like Host_Dock(...)
+    /// roots its host even when the host type is never mentioned. Attached setters apply to any
+    /// control, and the host can be a control or a plain/static helper class. The naming must match
+    /// AttachedPropertyExtensionInfo exactly, including metadata aliases.
+    /// </summary>
+    private static void AddAttachedHostIndex(
+        INamedTypeSymbol type,
+        Dictionary<TypeKey, INamedTypeSymbol> byKey,
+        Dictionary<string, INamedTypeSymbol> attachedHostsByName)
+    {
+        if (!type.IsAccessibleFromGeneratedCode())
+        {
+            return;
+        }
+
+        var key = TypeKey.Create(type);
+        foreach (var field in type.GetMembers().OfType<IFieldSymbol>().Where(static field => field.IsAttachedPropertyField()))
+        {
+            var memberName = field.GetMemberName();
+            var metadata = ControlModelBuilder.GetMetadata(field);
+            if (metadata.Ignore ||
+                type.GetMembers($"Set{memberName}").FirstOrDefault() is not IMethodSymbol setter ||
+                setter.Parameters.Length == 0)
+            {
+                continue;
+            }
+
+            var extensionName = $"{type.Name.Split('`')[0]}_{metadata.Alias ?? memberName}";
+            if (attachedHostsByName.ContainsKey(extensionName))
+            {
+                continue;
+            }
+
+            attachedHostsByName.Add(extensionName, type);
+            if (!byKey.ContainsKey(key))
+            {
+                byKey.Add(key, type);
+            }
         }
     }
 

@@ -31,6 +31,22 @@ internal static class UsageResolver
 
         foreach (var name in names.Distinct(StringComparer.Ordinal))
         {
+            // An attached-property extension name (Host_Property) must root its host even when the
+            // host type is never mentioned, because the generated setter applies to any control.
+            if (catalog.TryGetAttachedPropertyHost(name, out var attachedHost))
+            {
+                if (attachedHost.IsOrInheritsFrom("Avalonia.AvaloniaObject"))
+                {
+                    AddWithClosure(attachedHost, keys);
+                }
+                else
+                {
+                    // Attached properties can live on a plain/static helper class. Such a host has
+                    // no Avalonia base chain, but its model still emits the attached setters.
+                    keys.Add(TypeKey.Create(attachedHost));
+                }
+            }
+
             var entries = catalog.Lookup(name);
             if (entries.Count == 0)
             {

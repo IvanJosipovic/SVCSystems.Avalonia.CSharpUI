@@ -3,7 +3,7 @@
 Status: **implemented**
 Applies to: `SVCSystems.Avalonia.CSharpUI.SourceGenerator`
 
-Implementation notes: the curated common-control list is a `typeof(...)` assembly attribute (`GenerateMarkupControlAttribute`) in the runtime library, because the `netstandard2.0` generator cannot reference Avalonia 12 (net8.0/net10.0 only). The same attribute can be applied in the consuming assembly as a narrow per-type opt-in. The legacy `GenerateMarkupExtensionsFor*` attributes and public-extension publishing are removed. **228 tests pass** (114 per target framework) on net10.0 and net11.0.
+Implementation notes: the curated common-control list is a `typeof(...)` assembly attribute (`GenerateMarkupControlAttribute`) in the runtime library, because the `netstandard2.0` generator cannot reference Avalonia 12 (net8.0/net10.0 only). The same attribute can be applied in the consuming assembly as a narrow per-type opt-in. The legacy `GenerateMarkupExtensionsFor*` attributes and public-extension publishing are removed. **234 tests pass** (117 per target framework) on net10.0 and net11.0.
 
 ## Decisions (confirmed)
 
@@ -74,7 +74,7 @@ The result is a sorted `UsageResult` of stable `TypeKey`s (`assembly identity + 
 
 ### 2.2 Why base-type closure is mandatory
 
-Setters are emitted on the type that *declares* the Avalonia property (`ExternalGeneratorHost.GetPropertyInfos` uses `DeclaredProperties`). Extension resolution walks base types, so `Button().Margin(...)` requires `Layoutable` in the set. Closing over the chain (`Button → ContentControl → TemplatedControl → Control → InputElement → Interactive → Layoutable → Visual → StyledElement → Animatable → AvaloniaObject`) preserves this. `StyledElement`'s style-field special case and attached setters (hosted by e.g. `LevelBadge`) also depend on the host being present.
+Setters are emitted on the type that *declares* the Avalonia property (`ExternalGeneratorHost.GetPropertyInfos` uses `DeclaredProperties`). Extension resolution walks base types, so `Button().Margin(...)` requires `Layoutable` in the set. Closing over the chain (`Button → ContentControl → TemplatedControl → Control → InputElement → Interactive → Layoutable → Visual → StyledElement → Animatable → AvaloniaObject`) preserves this. `StyledElement`'s style-field special case and attached setters (hosted by e.g. `LevelBadge`) also depend on the host being present. `ControlCatalog` indexes the generated attached-property extension names (`Host_Property`, including metadata aliases), so calling one in source — e.g. `Grid_Row(...)` or `ThirdPartyGrid_Dock(...)` — roots its host automatically, even when the host type is never named. This works for hosts that are controls and for hosts that are plain non-control classes; only the latter don't get factories or base-chain entries.
 
 ### 2.3 Control catalog
 
@@ -129,7 +129,7 @@ The library is in alpha, so these breaking changes (public attributes removed, g
 
 ## 5. Verification
 
-- `dotnet build` and `dotnet test`: green on net10.0/net11.0, **228/228 tests**.
+- `dotnet build` and `dotnet test`: green on net10.0/net11.0, **234/234 tests**.
 - Generated sources in the test project: **202 → 70** external extension files (258 → 170 total generated files).
 - Measured full-solution builds (two runs each, HEAD worktree vs current tree):
 

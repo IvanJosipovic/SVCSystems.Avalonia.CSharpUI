@@ -444,6 +444,98 @@ public class MarkupExtensionGenerationTests
             source.Contains("internal static partial class ExternalWidgetFixture_ExternalWidget_MarkupExtensions", StringComparison.Ordinal));
     }
 
+    private static PortableExecutableReference CreateAttachedHostLibrary(string alias = "") =>
+        EmitReference(CreateCompilation("AttachedHostLibrary_" + alias, $$"""
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace AttachedHostFixture;
+
+            public sealed class HostControl : Control
+            {
+                {{alias}}public static readonly AttachedProperty<bool> DockProperty =
+                    AvaloniaProperty.RegisterAttached<HostControl, Control, bool>("Dock");
+
+                public static bool GetDock(AvaloniaObject element) => element.GetValue(DockProperty);
+                public static void SetDock(AvaloniaObject element, bool value) => element.SetValue(DockProperty, value);
+            }
+            """));
+
+    [Fact]
+    public void Attached_property_extension_name_roots_its_host()
+    {
+        var library = CreateAttachedHostLibrary();
+        var consumer = RunGenerator(CreateCompilationWithReferences("AttachedHostConsumer", """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static TextBlock Apply() => new TextBlock().HostControl_Dock(true);
+            }
+            """, library));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        var hostExtensions = Assert.Single(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class AttachedHostFixture_HostControl_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains("HostControl_Dock", hostExtensions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Aliased_attached_property_extension_name_roots_its_host()
+    {
+        var library = CreateAttachedHostLibrary("[SVCSystemsCSharpUIGeneratorMetadata(Alias = \"Pin\")]\n                ");
+        var consumer = RunGenerator(CreateCompilationWithReferences("AliasedAttachedHostConsumer", """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static TextBlock Apply() => new TextBlock().HostControl_Pin(true);
+            }
+            """, library));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        var hostExtensions = Assert.Single(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class AttachedHostFixture_HostControl_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains("HostControl_Pin", hostExtensions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Attached_property_on_static_host_is_generated()
+    {
+        var library = EmitReference(CreateCompilation("StaticAttachedHostLibrary", """
+            using Avalonia;
+            using Avalonia.Controls;
+
+            namespace StaticAttachedHostFixture;
+
+            public sealed class StaticHost
+            {
+                public static readonly AttachedProperty<bool> PinProperty =
+                    AvaloniaProperty.RegisterAttached<StaticHost, Control, bool>("Pin");
+
+                public static bool GetPin(AvaloniaObject element) => element.GetValue(PinProperty);
+                public static void SetPin(AvaloniaObject element, bool value) => element.SetValue(PinProperty, value);
+            }
+            """));
+        var consumer = RunGenerator(CreateCompilationWithReferences("StaticAttachedHostConsumer", """
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            public static class Usage
+            {
+                public static TextBlock Apply() => new TextBlock().StaticHost_Pin(true);
+            }
+            """, library));
+
+        AssertNoErrors(consumer.OutputCompilation);
+        var hostExtensions = Assert.Single(consumer.GeneratedSources, static source =>
+            source.Contains("internal static partial class StaticAttachedHostFixture_StaticHost_MarkupExtensions", StringComparison.Ordinal));
+        Assert.Contains("StaticHost_Pin", hostExtensions, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Assembly_attribute_is_a_per_type_opt_in_for_unmentioned_controls()
     {
