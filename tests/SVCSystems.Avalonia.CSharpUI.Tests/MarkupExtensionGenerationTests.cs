@@ -631,6 +631,36 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
+    public void Generic_control_cref_is_well_formed()
+    {
+        var compilation = CreateCompilation("Cref", """
+            using Avalonia.Controls;
+            using System.Collections.Generic;
+
+            public class Paired<TFirst, TSecond> : Control { }
+            public class Concrete : Paired<int, List<string>[]> { }
+            public class @event : Control { }
+            """);
+        var genericBase = compilation.GetTypeByMetadataName("Concrete")!.BaseType!;
+
+        var utilities = typeof(ExternalAssemblyExtensionsGenerator).Assembly
+            .GetType("SVCSystems.Avalonia.CSharpUI.SourceGenerator.SymbolUtilities")!;
+        var getCrefName = utilities.GetMethod("GetCrefName", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+        var cref = (string)getCrefName.Invoke(null, [genericBase])!;
+
+        Assert.StartsWith("global::Paired{", cref, StringComparison.Ordinal);
+        Assert.EndsWith("}", cref, StringComparison.Ordinal);
+        Assert.Contains("global::System.Int32", cref, StringComparison.Ordinal);
+        Assert.Contains("global::System.Collections.Generic.List{global::System.String}[]", cref, StringComparison.Ordinal);
+        Assert.DoesNotContain("<", cref, StringComparison.Ordinal);
+        Assert.DoesNotContain(">", cref, StringComparison.Ordinal);
+
+        var keywordControl = compilation.GetTypeByMetadataName("event")!;
+        var keywordCref = (string)getCrefName.Invoke(null, [keywordControl])!;
+        Assert.Equal("global::@event", keywordCref);
+    }
+
+    [Fact]
     public void Common_controls_are_generated_without_being_mentioned_in_source()
     {
         var result = RunGenerator(CreateCompilation("CommonControls", "using Avalonia.Controls;"));

@@ -135,8 +135,9 @@ internal sealed class ExternalGeneratorHost
         sb.AppendLine();
         sb.AppendLine("namespace SVCSystems.Avalonia.CSharpUI;");
         var typeName = controlModel.Type.GetFullTypeName();
+        var crefName = SymbolUtilities.GetCrefName(controlModel.Type);
         sb.AppendLine("/// <summary>");
-        sb.AppendLine($"/// Fluent setters, binding helpers, event helpers and style setters for <see cref=\"{typeName}\"/>.");
+        sb.AppendLine($"/// Fluent setters, binding helpers, event helpers and style setters for <see cref=\"{crefName}\"/>.");
         sb.AppendLine("/// </summary>");
         sb.AppendLine("[global::System.CodeDom.Compiler.GeneratedCode(\"SVCSystems.Avalonia.CSharpUI.SourceGenerator\", \"1.0.0.0\")]");
         sb.AppendLine("[global::System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]");
