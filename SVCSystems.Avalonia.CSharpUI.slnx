@@ -11,4 +11,5 @@
   <Project Path="src/SVCSystems.Avalonia.CSharpUI/SVCSystems.Avalonia.CSharpUI.csproj" />
   <Project Path="tests/SVCSystems.Avalonia.CSharpUI.Tests/SVCSystems.Avalonia.CSharpUI.Tests.csproj" />
   <Project Path="tests/SVCSystems.Avalonia.CSharpUI.Tests.XamlFixtures/SVCSystems.Avalonia.CSharpUI.Tests.XamlFixtures.csproj" />
+  <Project Path="benchmarks/SVCSystems.Avalonia.CSharpUI.SourceGenerator.Benchmarks/SVCSystems.Avalonia.CSharpUI.SourceGenerator.Benchmarks.csproj" />
 </Solution>

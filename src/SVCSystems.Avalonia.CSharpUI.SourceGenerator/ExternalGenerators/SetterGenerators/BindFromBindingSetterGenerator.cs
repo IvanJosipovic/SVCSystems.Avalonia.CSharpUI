@@ -1,25 +1,26 @@
+using System.Text;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExtensionInfos;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.SetterGenerators;
 
 /// <summary>
 /// Generates a named overload for each property that accepts a ready-made <c>BindingBase</c>
-/// (reflection <c>Binding</c>, compiled binding, template binding, multi-binding, …), e.g.
+/// (reflection <c>Binding</c>, compiled binding, template binding, multi-binding, .), e.g.
 /// <c>new TextBlock().Text(new Binding("Value"))</c>. See issue #121.
 /// </summary>
 internal sealed class BindFromBindingSetterGenerator : ExtensionGeneratorBase<PropertyExtensionInfo>
 {
-    protected override string? GetExtension(PropertyExtensionInfo info)
+    protected override void AppendExtension(StringBuilder builder, PropertyExtensionInfo info)
     {
         // Guard against the (rare) property whose own value type is BindingBase, so the generated
         // overload never collides with the value setter of the same signature.
         if (info.ValueTypeSource is "global::Avalonia.Data.BindingBase" or "global::Avalonia.Data.BindingBase?")
         {
-            return null;
+            return;
         }
 
-        return PrefixDocumentation(info.XmlDoc,
-            $"public static {info.ReturnType} {info.ExtensionName}{info.GenericArg}(this {info.ReturnType} control, BindingBase binding{CallerInfoParameters}) {info.GenericConstraint} {SymbolUtilities.NewLine}" +
-            $"   => control.BindValue({info.ControlTypeName}.{info.FieldSymbol.Name}!, binding{CallerInfoArguments});");
+        AppendDocumentation(builder, info.XmlDoc);
+        builder.Append($"public static {info.ReturnType} {info.ExtensionName}{info.GenericArg}(this {info.ReturnType} control, BindingBase binding{CallerInfoParameters}) {info.GenericConstraint} {SymbolUtilities.NewLine}");
+        builder.Append($"   => control.BindValue({info.ControlTypeName}.{info.FieldSymbol.Name}!, binding{CallerInfoArguments});");
     }
 }

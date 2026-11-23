@@ -1,3 +1,4 @@
+using System.Text;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExtensionInfos;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.AttachedPropertySetterGenerator;
@@ -8,20 +9,16 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.Attach
 /// </summary>
 internal sealed class AttachedPropertyBindFromBindingSetterGenerator : ExtensionGeneratorBase<AttachedPropertyExtensionInfo>
 {
-    protected override string? GetExtension(AttachedPropertyExtensionInfo info)
+    protected override void AppendExtension(StringBuilder builder, AttachedPropertyExtensionInfo info)
     {
-        if (string.IsNullOrWhiteSpace(info.AttachedPropertyHostTypeName))
+        if (string.IsNullOrWhiteSpace(info.AttachedPropertyHostTypeName) ||
+            info.ValueTypeSource is "global::Avalonia.Data.BindingBase" or "global::Avalonia.Data.BindingBase?")
         {
-            return null;
+            return;
         }
 
-        if (info.ValueTypeSource is "global::Avalonia.Data.BindingBase" or "global::Avalonia.Data.BindingBase?")
-        {
-            return null;
-        }
-
-        return PrefixDocumentation(info.XmlDoc,
-            $"public static T {info.ExtensionName}<T>(this T control, BindingBase binding{CallerInfoParameters}) where T : {info.AttachedPropertyHostTypeName} {SymbolUtilities.NewLine}" +
-            $"   => control.BindValue({info.ControlTypeName}.{info.FieldSymbol.Name}!, binding{CallerInfoArguments});");
+        AppendDocumentation(builder, info.XmlDoc);
+        builder.Append($"public static T {info.ExtensionName}<T>(this T control, BindingBase binding{CallerInfoParameters}) where T : {info.AttachedPropertyHostTypeName} {SymbolUtilities.NewLine}");
+        builder.Append($"   => control.BindValue({info.ControlTypeName}.{info.FieldSymbol.Name}!, binding{CallerInfoArguments});");
     }
 }

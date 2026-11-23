@@ -1,3 +1,4 @@
+using System.Text;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExtensionInfos;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.StyleSetterGenerators;
@@ -9,15 +10,15 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.StyleS
 /// </summary>
 internal sealed class BindFromBindingStyleSetterGenerator : ExtensionGeneratorBase<PropertyExtensionInfo>
 {
-    protected override string? GetExtension(PropertyExtensionInfo info)
+    protected override void AppendExtension(StringBuilder builder, PropertyExtensionInfo info)
     {
         if (info.ValueTypeSource is "global::Avalonia.Data.BindingBase" or "global::Avalonia.Data.BindingBase?")
         {
-            return null;
+            return;
         }
 
-        return PrefixDocumentation(info.XmlDoc,
-            $"public static Style<{info.ReturnType}> {info.ExtensionName}{info.GenericArg}(this Style<{info.ReturnType}> style, BindingBase binding{CallerInfoParameters}) {info.StyleGenericConstraint} {SymbolUtilities.NewLine}" +
-            $"   => style._addSetter({info.ControlTypeName}.{info.MemberName}Property!, binding, _callerFile, _callerLine);");
+        AppendDocumentation(builder, info.XmlDoc);
+        builder.Append($"public static Style<{info.ReturnType}> {info.ExtensionName}{info.GenericArg}(this Style<{info.ReturnType}> style, BindingBase binding{CallerInfoParameters}) {info.StyleGenericConstraint} {SymbolUtilities.NewLine}");
+        builder.Append($"   => style._addSetter({info.ControlTypeName}.{info.MemberName}Property!, binding, _callerFile, _callerLine);");
     }
 }

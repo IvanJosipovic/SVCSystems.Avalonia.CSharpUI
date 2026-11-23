@@ -1,5 +1,8 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Microsoft.CodeAnalysis;
+using SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
 
@@ -11,7 +14,95 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
 /// </summary>
 internal static class UsageResolver
 {
-    internal static UsageResult Resolve(ControlCatalog catalog, ImmutableArray<string> names)
+    private readonly struct CacheKey : IEquatable<CacheKey>
+    {
+        internal CacheKey(ulong references, ulong names, ulong locals)
+        {
+            References = references;
+            Names = names;
+            Locals = locals;
+        }
+
+        internal ulong References { get; }
+        internal ulong Names { get; }
+        internal ulong Locals { get; }
+
+        public bool Equals(CacheKey other) =>
+            References == other.References && Names == other.Names && Locals == other.Locals;
+
+        public override bool Equals(object? obj) => obj is CacheKey other && Equals(other);
+
+        public override int GetHashCode() => unchecked((int)(References ^ Names ^ Locals));
+    }
+
+    // A catalog is rebuilt whenever source can affect usage. Scoping the cache to the catalog
+    // instance guarantees that no inheritance, local-control or common-type change is missed.
+    private static readonly ConditionalWeakTable<ControlCatalog, ConcurrentDictionary<CacheKey, UsageResult>> Cache = new();
+
+    internal static UsageResult Resolve(
+        ControlCatalog catalog,
+        ImmutableArray<string> names,
+        CancellationToken cancellationToken = default,
+        ulong referenceHash = 0)
+    {
+        var cache = Cache.GetValue(catalog, static _ => new ConcurrentDictionary<CacheKey, UsageResult>());
+        var key = new CacheKey(
+            referenceHash,
+            HashNames(names),
+            HashLocalControls(catalog));
+        if (cache.TryGetValue(key, out var cached))
+        {
+            return cached;
+        }
+
+        var result = ResolveCore(catalog, names, cancellationToken);
+        return cache.GetOrAdd(key, result);
+    }
+
+    private static ulong HashNames(ImmutableArray<string> names)
+    {
+        const ulong offset = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        var hash = offset;
+        foreach (var name in names)
+        {
+            foreach (var ch in name)
+            {
+                hash = (hash ^ ch) * prime;
+            }
+
+            hash = (hash ^ 0xFFFF) * prime;
+        }
+
+        return hash;
+    }
+
+    private static ulong HashLocalControls(ControlCatalog catalog)
+    {
+        const ulong prime = 1099511628211UL;
+        var hash = 14695981039346656037UL;
+        foreach (var entry in catalog.LocalEntries)
+        {
+            foreach (var ch in entry.Key.AssemblyName)
+            {
+                hash = (hash ^ ch) * prime;
+            }
+
+            foreach (var ch in entry.Key.TypeName)
+            {
+                hash = (hash ^ ch) * prime;
+            }
+
+            hash = (hash ^ 0xFFFF) * prime;
+        }
+
+        return hash;
+    }
+
+    private static UsageResult ResolveCore(
+        ControlCatalog catalog,
+        ImmutableArray<string> names,
+        CancellationToken cancellationToken)
     {
         var keys = new HashSet<TypeKey>();
         var ambiguous = new SortedSet<string>(StringComparer.Ordinal);
@@ -31,6 +122,7 @@ internal static class UsageResolver
 
         foreach (var name in names.Distinct(StringComparer.Ordinal))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // An attached-property extension name (Host_Property) must root its host even when the
             // host type is never mentioned, because the generated setter applies to any control.
             if (catalog.TryGetAttachedPropertyHost(name, out var attachedHost))
@@ -86,16 +178,30 @@ internal static class UsageResolver
 
     private static void AddWithClosure(INamedTypeSymbol type, HashSet<TypeKey> keys)
     {
-        INamedTypeSymbol? current = type;
-        while (current is not null && current.SpecialType != SpecialType.System_Object)
+        // Inheritance is transitive: if the root derives from AvaloniaObject, every ancestor in
+        // this chain does too. One check replaces the old O(depth^2) check-per-ancestor.
+        var isAvaloniaObject = type.IsOrInheritsFrom("Avalonia.AvaloniaObject");
+        if (!isAvaloniaObject)
         {
-            if (current.IsOrInheritsFrom("Avalonia.AvaloniaObject") &&
-                current.IsAccessibleFromGeneratedCode())
+            return;
+        }
+
+        for (INamedTypeSymbol? current = type;
+             current is not null && current.SpecialType != SpecialType.System_Object;
+             current = current.BaseType)
+        {
+            if (current.IsAccessibleFromGeneratedCode())
             {
                 keys.Add(TypeKey.Create(current));
             }
 
-            current = current.BaseType;
+            // Bases above AvaloniaObject do not themselves inherit from it; the old loop stopped
+            // adding them. Stop here to preserve exactly the same key set.
+            if (current.Name == "AvaloniaObject" &&
+                current.ContainingNamespace?.ToDisplayString() == "Avalonia")
+            {
+                break;
+            }
         }
     }
 }

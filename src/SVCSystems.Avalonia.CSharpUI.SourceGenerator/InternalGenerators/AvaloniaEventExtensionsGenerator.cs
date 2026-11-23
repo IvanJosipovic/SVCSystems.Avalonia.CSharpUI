@@ -19,30 +19,16 @@ public class AvaloniaEventExtensionsGenerator : IIncrementalGenerator
 #endif
         Debug.WriteLine("Initialize AvaloniaEventExtensionsGenerator code generator");
 
-        var classDeclarations = context.SyntaxProvider
-            .CreateSyntaxProvider(
-                predicate: static (s, _) => s is ClassDeclarationSyntax,
-                transform: static (ctx, _) => GetSemanticTarget(ctx))
-            .Where(static c => c is not null);
-
-        context.RegisterSourceOutput(classDeclarations,
-            static (spc, classDecl) => GenerateSource(spc, classDecl!));
+        // Shares one class-declaration pass with the property generator when both are registered.
+        ViewExtensionGenerator.Register(context, emitPropertyExtensions: false, emitEventExtensions: true);
     }
 
-    private static ClassDeclarationSyntax? GetSemanticTarget(GeneratorSyntaxContext context)
+    internal static (string HintName, string Text)? GenerateSource(
+        ClassDeclarationSyntax classDecl,
+        CancellationToken cancellationToken)
     {
-        var classDecl = (ClassDeclarationSyntax)context.Node;
-        var symbol = context.SemanticModel.GetDeclaredSymbol(classDecl);
-        if (symbol is INamedTypeSymbol typeSymbol && IsAvaloniaMarkupView(typeSymbol))
-        {
-            return classDecl;
-        }
-        return null;
-    }
-
-    private static void GenerateSource(SourceProductionContext context, ClassDeclarationSyntax classDecl)
-    {
-        var root = classDecl.SyntaxTree.GetRoot();
+        cancellationToken.ThrowIfCancellationRequested();
+        var root = classDecl.SyntaxTree.GetRoot(cancellationToken);
 
         var ns = root
             .DescendantNodes()
@@ -110,10 +96,9 @@ public class AvaloniaEventExtensionsGenerator : IIncrementalGenerator
 
         sb.AppendLine("}");
 
-        if (processedMembersCount > 0)
-        {
-            context.AddSource($"{safeId}EventExtensions.g.cs", SourceText.From(sb.ToString(), Encoding.UTF8));
-        }
+        return processedMembersCount > 0
+            ? ($"{safeId}EventExtensions.g.cs", sb.ToString())
+            : null;
     }
 
     // Rewritten for clarity: separates logic for EventHandler, EventHandler<T>, Action, and Action<T>.

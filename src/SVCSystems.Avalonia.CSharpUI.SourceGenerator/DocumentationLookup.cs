@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Text;
-using System.Threading;
 using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 
@@ -18,9 +18,20 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator;
 /// </summary>
 internal static class DocumentationLookup
 {
-    private static readonly ConcurrentDictionary<string, Lazy<string?>> PathByIdentity = new(StringComparer.Ordinal);
+    private sealed class PathBox
+    {
+        internal string? Path;
+    }
+
+    // Keyed by the assembly symbol rather than its display name: two distinct references may
+    // share an identity, and stale identity-keyed entries could point at the wrong XML file.
+    private static readonly ConditionalWeakTable<IAssemblySymbol, PathBox> PathByAssembly = new();
     private static readonly ConcurrentDictionary<string, Lazy<Dictionary<string, string>>> RawEntriesByPath = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<(string Path, string Id), string> FormattedEntries = new();
+
+    // Symbols are canonical within a compilation and documentation is immutable for a symbol.
+    // This also covers source symbols, which used to reparse their XML trivia on every request.
+    private static readonly ConditionalWeakTable<ISymbol, string> FormattedBySymbol = new();
 
     /// <summary>Returns documentation already formatted as /// lines.</summary>
     internal static string GetDocumentation(ISymbol? symbol, Compilation? compilation)
@@ -30,6 +41,18 @@ internal static class DocumentationLookup
             return string.Empty;
         }
 
+        if (FormattedBySymbol.TryGetValue(symbol, out var cached))
+        {
+            return cached;
+        }
+
+        var formatted = GetDocumentationCore(symbol, compilation);
+        FormattedBySymbol.GetValue(symbol, _ => formatted);
+        return formatted;
+    }
+
+    private static string GetDocumentationCore(ISymbol symbol, Compilation? compilation)
+    {
         // Source symbols carry their documentation in the symbol itself.
         if (IsSourceSymbol(symbol))
         {
@@ -50,9 +73,10 @@ internal static class DocumentationLookup
             {
                 if (entries.TryGetValue(id, out var raw))
                 {
-                    return FormattedEntries.GetOrAdd(
-                        (path, id),
-                        static key => FormatDocumentation(RawEntriesByPath[key.Path].Value[key.Id]));
+                    var key = (path, id);
+                    return FormattedEntries.TryGetValue(key, out var formatted)
+                        ? formatted
+                        : FormattedEntries.GetOrAdd(key, FormatDocumentation(raw));
                 }
             }
         }
@@ -71,10 +95,8 @@ internal static class DocumentationLookup
             return string.Empty;
         }
 
-        var lines = xmlDoc!
-            .Replace("\r\n", "\n")
-            .Replace('\r', '\n')
-            .Split('\n');
+        // Split on both newline characters in one pass (the old code copied the string twice).
+        var lines = xmlDoc!.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
 
         var sb = new StringBuilder(xmlDoc.Length + (lines.Length * 5));
         foreach (var line in lines)
@@ -170,12 +192,8 @@ internal static class DocumentationLookup
             return null;
         }
 
-        // Assembly identity is stable across compilations, so this survives editor keystrokes.
-        var key = assembly.Identity.GetDisplayName();
-        return PathByIdentity
-            .GetOrAdd(key, _ => new Lazy<string?>(
-                () => FindXmlPath(compilation, assembly),
-                LazyThreadSafetyMode.ExecutionAndPublication))
-            .Value;
+        return PathByAssembly.GetValue(
+            assembly,
+            _ => new PathBox { Path = FindXmlPath(compilation, assembly) }).Path;
     }
 }

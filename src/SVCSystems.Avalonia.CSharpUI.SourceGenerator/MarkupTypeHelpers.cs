@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -9,11 +10,16 @@ internal static class MarkupTypeHelpers
 {
     internal const string NewLine = "\n";
 
-    internal static bool IsAvaloniaMarkupView(INamedTypeSymbol typeSymbol)
+    private sealed class BoolBox
     {
-        return typeSymbol.AllInterfaces
-               .Any(x => x.Name == "IDeclarativeViewBase");
+        internal bool Value;
     }
+
+    private static readonly ConditionalWeakTable<INamedTypeSymbol, BoolBox> MarkupViewCache = new();
+
+    internal static bool IsAvaloniaMarkupView(INamedTypeSymbol typeSymbol) =>
+        MarkupViewCache.GetValue(typeSymbol, static type =>
+            new BoolBox { Value = type.AllInterfaces.Any(x => x.Name == "IDeclarativeViewBase") }).Value;
 
     internal static ImmutableArray<ClassDeclarationSyntax> FindAvaloniaMarkupViews(Compilation compilation)
     {

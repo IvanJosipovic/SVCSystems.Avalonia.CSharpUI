@@ -1,13 +1,19 @@
+using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
+using SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
 
 /// <summary>
 /// Generates reflection-free factories for compiled XAML resources in referenced assemblies.
-/// Registered by <see cref="Generator"/>; instantiated directly by generator tests.
+/// Requests come from an attribute-driven incremental provider; the compilation is only used
+/// inside the generation step, and the step emits strings so no syntax tree or semantic model is
+/// retained by the incremental cache.
 /// </summary>
 public sealed class XamlResourceGenerator : IIncrementalGenerator
 {
@@ -31,66 +37,147 @@ public sealed class XamlResourceGenerator : IIncrementalGenerator
         "Cannot generate '{0}': '{1}' must identify a public compiled ResourceDictionary or IStyle factory in a referenced assembly",
         "SVCSystems.Avalonia.CSharpUI", DiagnosticSeverity.Error, true);
 
-    public void Initialize(IncrementalGeneratorInitializationContext context) =>
-        context.RegisterSourceOutput(context.CompilationProvider, static (spc, compilation) =>
-            Generate(spc, compilation));
-
-    private static void Generate(SourceProductionContext context, Compilation compilation)
+    public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var attribute in compilation.Assembly.GetAttributes()
-                     .Where(static a => a.AttributeClass?.ToDisplayString() == AttributeName))
+        // ForAttributeWithMetadataName does not surface assembly-level attributes in this
+        // Roslyn version, so select candidate attribute syntax and bind it to the matching
+        // AttributeData from the assembly symbol.
+        var requests = context.SyntaxProvider
+            .CreateSyntaxProvider(
+                // Do not pre-filter by identifier: a using alias can stand in for the attribute
+                // name. CreateRequest binds every candidate semantically to the real attribute.
+                predicate: static (node, _) => node is AttributeSyntax,
+                transform: static (ctx, cancellationToken) => CreateRequest(ctx, cancellationToken))
+            .Where(static request => request is not null)
+            .Select(static (request, _) => request!.Value)
+            .WithComparer(XamlRequestComparer.Instance)
+            .WithTrackingName("XamlResource.Requests");
+
+        var generation = requests.Collect()
+            .Combine(context.CompilationProvider)
+            .Select(static (pair, cancellationToken) => Generate(pair.Left, pair.Right, cancellationToken))
+            .WithComparer(XamlGenerationResultComparer.Instance)
+            .WithTrackingName("XamlResource.Generate");
+
+        context.RegisterSourceOutput(generation,
+            static (sourceContext, result) => Emit(sourceContext, result));
+    }
+
+    private static XamlRequest? CreateRequest(
+        GeneratorSyntaxContext context,
+        CancellationToken cancellationToken)
+    {
+        var syntax = (AttributeSyntax)context.Node;
+        foreach (var attribute in context.SemanticModel.Compilation.Assembly.GetAttributes())
         {
-            context.CancellationToken.ThrowIfCancellationRequested();
-            var location = attribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation()
-                ?? Location.None;
-            if (!SupportsAccessors(compilation))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (attribute.AttributeClass?.ToDisplayString() != AttributeName ||
+                attribute.ApplicationSyntaxReference is not { } reference ||
+                reference.SyntaxTree != syntax.SyntaxTree ||
+                reference.Span != syntax.Span)
             {
-                context.ReportDiagnostic(Diagnostic.Create(UnsupportedFramework, location));
                 continue;
             }
 
-            var source = attribute.ConstructorArguments.ElementAtOrDefault(0).Value as string;
-            var name = attribute.ConstructorArguments.ElementAtOrDefault(1).Value as string;
+            return new XamlRequest(
+                attribute.ConstructorArguments.ElementAtOrDefault(0).Value as string,
+                attribute.ConstructorArguments.ElementAtOrDefault(1).Value as string,
+                syntax.GetLocation());
+        }
+
+        return null;
+    }
+
+    private static XamlGenerationResult Generate(
+        ImmutableArray<XamlRequest> requests,
+        Compilation compilation,
+        CancellationToken cancellationToken)
+    {
+        if (requests.IsDefaultOrEmpty)
+        {
+            return XamlGenerationResult.Empty;
+        }
+
+        var key = ComputeKey(requests, compilation, cancellationToken);
+        return XamlGenerationCache.GetOrAdd(key, () => GenerateCore(requests, compilation, cancellationToken));
+    }
+
+    private static XamlGenerationResult GenerateCore(
+        ImmutableArray<XamlRequest> requests,
+        Compilation compilation,
+        CancellationToken cancellationToken)
+    {
+        var supportsAccessors = SupportsAccessors(compilation);
+        var assembliesByName = new Dictionary<string, IAssemblySymbol>(StringComparer.OrdinalIgnoreCase);
+        foreach (var reference in compilation.References)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (compilation.GetAssemblyOrModuleSymbol(reference) is IAssemblySymbol assembly &&
+                !assembliesByName.ContainsKey(assembly.Name))
+            {
+                assembliesByName.Add(assembly.Name, assembly);
+            }
+        }
+
+        var resourceDictionary = compilation.GetTypeByMetadataName("Avalonia.Controls.IResourceDictionary");
+        var style = compilation.GetTypeByMetadataName("Avalonia.Styling.IStyle");
+
+        var sources = ImmutableArray.CreateBuilder<(string Hint, string Text)>();
+        var diagnostics = ImmutableArray.CreateBuilder<XamlDiagnostic>();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var request in requests)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var location = request.Location;
+            if (!supportsAccessors)
+            {
+                diagnostics.Add(new XamlDiagnostic("SVCUIGEN002", DiagnosticSeverity.Error, [], location));
+                continue;
+            }
+
+            var source = request.Source;
+            var name = request.Name;
             if (string.IsNullOrEmpty(name) || !SyntaxFacts.IsValidIdentifier(name) ||
                 SyntaxFacts.GetKeywordKind(name) != SyntaxKind.None || name![0] == '@' ||
                 name == "Create" || name == "Build")
             {
-                context.ReportDiagnostic(Diagnostic.Create(InvalidRequest, location,
-                    "factoryName must be a non-keyword C# class identifier other than 'Create' or 'Build'"));
+                diagnostics.Add(new XamlDiagnostic("SVCUIGEN004", DiagnosticSeverity.Error,
+                    ["factoryName must be a non-keyword C# class identifier other than 'Create' or 'Build'"],
+                    location));
                 continue;
             }
 
             if (!names.Add(name!) || compilation.GetTypeByMetadataName($"{GeneratedNamespace}.{name}") is not null)
             {
-                context.ReportDiagnostic(Diagnostic.Create(InvalidRequest, location,
-                    $"factory name '{name}' is already in use"));
+                diagnostics.Add(new XamlDiagnostic("SVCUIGEN004", DiagnosticSeverity.Error,
+                    [$"factory name '{name}' is already in use"], location));
                 continue;
             }
 
             var uri = ParseSource(source);
             if (uri is null)
             {
-                context.ReportDiagnostic(Diagnostic.Create(InvalidRequest, location,
-                    "source must be an absolute avares URI without a query, fragment, credentials, or port"));
+                diagnostics.Add(new XamlDiagnostic("SVCUIGEN004", DiagnosticSeverity.Error,
+                    ["source must be an absolute avares URI without a query, fragment, credentials, or port"],
+                    location));
                 continue;
             }
 
-            var assembly = compilation.References.Select(compilation.GetAssemblyOrModuleSymbol)
-                .OfType<IAssemblySymbol>()
-                .FirstOrDefault(a => string.Equals(a.Name, uri.Host, StringComparison.OrdinalIgnoreCase));
+            assembliesByName.TryGetValue(uri.Host, out var assembly);
             var methodName = "Build:" + Uri.UnescapeDataString(uri.AbsolutePath);
             var resources = assembly?.GetTypeByMetadataName(ResourcesType);
             var method = resources?.GetMembers(methodName).OfType<IMethodSymbol>()
                 .FirstOrDefault(m => m.IsStatic && m.DeclaredAccessibility == Accessibility.Public &&
                     m.Parameters.Length == 1 &&
                     m.Parameters[0].Type.ToDisplayString() == "System.IServiceProvider" &&
-                    IsResource(m.ReturnType, compilation));
+                    IsResource(m.ReturnType, resourceDictionary, style));
 
             if (method is null || resources?.DeclaredAccessibility != Accessibility.Public ||
                 !compilation.IsSymbolAccessibleWithin(method.ReturnType, compilation.Assembly))
             {
-                context.ReportDiagnostic(Diagnostic.Create(MissingFactory, location, name, source));
+                diagnostics.Add(new XamlDiagnostic("SVCUIGEN005", DiagnosticSeverity.Error,
+                    [name, source ?? string.Empty], location));
                 continue;
             }
 
@@ -114,8 +201,59 @@ public sealed class XamlResourceGenerator : IIncrementalGenerator
                         global::System.IServiceProvider services);
                 }
                 """;
-            context.AddSource($"{name}.XamlResource.g.cs", SourceText.From(code, Encoding.UTF8));
+            sources.Add(($"{name}.XamlResource.g.cs", code));
         }
+
+        return new XamlGenerationResult(sources.ToImmutable(), diagnostics.ToImmutable());
+    }
+
+    private static void Emit(SourceProductionContext context, XamlGenerationResult result)
+    {
+        foreach (var source in result.Sources)
+        {
+            context.AddSource(source.Hint, SourceText.From(source.Text, Encoding.UTF8));
+        }
+
+        foreach (var diagnostic in result.Diagnostics)
+        {
+            var descriptor = diagnostic.Id switch
+            {
+                "SVCUIGEN002" => UnsupportedFramework,
+                "SVCUIGEN005" => MissingFactory,
+                _ => InvalidRequest
+            };
+            context.ReportDiagnostic(Diagnostic.Create(
+                descriptor,
+                diagnostic.Location,
+                diagnostic.Arguments.AsSpan().ToArray()));
+        }
+    }
+
+    private static ulong ComputeKey(
+        ImmutableArray<XamlRequest> requests,
+        Compilation compilation,
+        CancellationToken cancellationToken)
+    {
+        const ulong offset = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        var hash = GenerationCache.GetReferenceHash(compilation, cancellationToken);
+
+        // The duplicate-name check reads compilation-local types and SupportsAccessors reads
+        // assembly attributes, so a reference-only key can reuse output that no longer matches.
+        // The full fingerprint covers every input tree and reference that can affect either.
+        var fingerprint = GenerationFingerprint.Create([], compilation, cancellationToken);
+        hash = (hash ^ fingerprint.Hash1) * prime;
+        hash = (hash ^ fingerprint.Hash2) * prime;
+        hash = (hash ^ (SupportsAccessors(compilation) ? 1UL : 0UL)) * prime;
+
+        foreach (var request in requests)
+        {
+            hash = (hash ^ (ulong)(request.Source?.GetHashCode() ?? 0)) * prime;
+            hash = (hash ^ (ulong)(request.Name?.GetHashCode() ?? 0)) * prime;
+            hash = (hash ^ (ulong)request.Location.GetHashCode()) * prime;
+        }
+
+        return hash == 0 ? offset : hash;
     }
 
     private static Uri? ParseSource(string? source)
@@ -154,11 +292,174 @@ public sealed class XamlResourceGenerator : IIncrementalGenerator
             compilation.GetSpecialType(SpecialType.System_Object).ContainingAssembly.Identity.Version.Major >= 10;
     }
 
-    private static bool IsResource(ITypeSymbol type, Compilation compilation)
+    private static bool IsResource(
+        ITypeSymbol type,
+        INamedTypeSymbol? dictionary,
+        INamedTypeSymbol? style) =>
+        type.AllInterfaces.Any(i =>
+            SymbolEqualityComparer.Default.Equals(i, dictionary) ||
+            SymbolEqualityComparer.Default.Equals(i, style));
+
+    private readonly struct XamlRequest : IEquatable<XamlRequest>
     {
-        var dictionary = compilation.GetTypeByMetadataName("Avalonia.Controls.IResourceDictionary");
-        var style = compilation.GetTypeByMetadataName("Avalonia.Styling.IStyle");
-        return type.AllInterfaces.Any(i =>
-            SymbolEqualityComparer.Default.Equals(i, dictionary) || SymbolEqualityComparer.Default.Equals(i, style));
+        internal XamlRequest(string? source, string? name, Location location)
+        {
+            Source = source;
+            Name = name;
+            Location = location;
+        }
+
+        internal string? Source { get; }
+
+        internal string? Name { get; }
+
+        internal Location Location { get; }
+
+        public bool Equals(XamlRequest other) =>
+            Source == other.Source &&
+            Name == other.Name &&
+            SameLocation(Location, other.Location);
+
+        public override bool Equals(object? obj) => obj is XamlRequest other && Equals(other);
+
+        public override int GetHashCode() =>
+            ((Source?.GetHashCode() ?? 0) * 397 ^ (Name?.GetHashCode() ?? 0)) * 397 ^ Location.GetHashCode();
     }
+
+    private sealed class XamlRequestComparer : IEqualityComparer<XamlRequest>
+    {
+        internal static readonly XamlRequestComparer Instance = new();
+
+        public bool Equals(XamlRequest x, XamlRequest y) => x.Equals(y);
+
+        public int GetHashCode(XamlRequest obj) => obj.GetHashCode();
+    }
+
+    private readonly struct XamlDiagnostic
+    {
+        internal XamlDiagnostic(string id, DiagnosticSeverity severity, ImmutableArray<string> arguments, Location location)
+        {
+            Id = id;
+            Severity = severity;
+            Arguments = arguments;
+            Location = location;
+        }
+
+        internal string Id { get; }
+
+        internal DiagnosticSeverity Severity { get; }
+
+        internal ImmutableArray<string> Arguments { get; }
+
+        internal Location Location { get; }
+    }
+
+    private sealed class XamlGenerationResult : IEquatable<XamlGenerationResult>
+    {
+        internal static readonly XamlGenerationResult Empty = new(
+            ImmutableArray<(string, string)>.Empty,
+            ImmutableArray<XamlDiagnostic>.Empty);
+
+        private readonly int _hash;
+
+        internal XamlGenerationResult(
+            ImmutableArray<(string Hint, string Text)> sources,
+            ImmutableArray<XamlDiagnostic> diagnostics)
+        {
+            Sources = sources;
+            Diagnostics = diagnostics;
+            unchecked
+            {
+                var hash = 17;
+                foreach (var source in sources)
+                {
+                    hash = (hash * 31) + source.Hint.GetHashCode() + source.Text.GetHashCode();
+                }
+
+                foreach (var diagnostic in diagnostics)
+                {
+                    hash = (hash * 31) + diagnostic.Id.GetHashCode();
+                    hash = (hash * 31) + diagnostic.Location.GetHashCode();
+                }
+
+                _hash = hash;
+            }
+        }
+
+        internal ImmutableArray<(string Hint, string Text)> Sources { get; }
+
+        internal ImmutableArray<XamlDiagnostic> Diagnostics { get; }
+
+        public bool Equals(XamlGenerationResult? other)
+        {
+            if (other is null || _hash != other._hash ||
+                Sources.Length != other.Sources.Length ||
+                Diagnostics.Length != other.Diagnostics.Length)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < Sources.Length; i++)
+            {
+                if (Sources[i] != other.Sources[i])
+                {
+                    return false;
+                }
+            }
+
+            for (var i = 0; i < Diagnostics.Length; i++)
+            {
+                var left = Diagnostics[i];
+                var right = other.Diagnostics[i];
+                if (left.Id != right.Id ||
+                    left.Severity != right.Severity ||
+                    !left.Arguments.SequenceEqual(right.Arguments) ||
+                    !SameLocation(left.Location, right.Location))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public override bool Equals(object? obj) => obj is XamlGenerationResult other && Equals(other);
+
+        public override int GetHashCode() => _hash;
+    }
+
+    private sealed class XamlGenerationResultComparer : IEqualityComparer<XamlGenerationResult>
+    {
+        internal static readonly XamlGenerationResultComparer Instance = new();
+
+        public bool Equals(XamlGenerationResult? x, XamlGenerationResult? y) =>
+            ReferenceEquals(x, y) || (x is not null && x.Equals(y));
+
+        public int GetHashCode(XamlGenerationResult obj) => obj.GetHashCode();
+    }
+
+    private static class XamlGenerationCache
+    {
+        private const int MaxEntries = 8;
+        private static readonly ConcurrentDictionary<ulong, XamlGenerationResult> Results = new();
+
+        internal static XamlGenerationResult GetOrAdd(ulong key, Func<XamlGenerationResult> create)
+        {
+            var result = Results.GetOrAdd(key, _ => create());
+            if (Results.Count > MaxEntries)
+            {
+                Results.Clear();
+            }
+
+            return result;
+        }
+    }
+
+    private static bool SameLocation(Location left, Location right) =>
+        // The tree instance matters: equal paths and spans in different tree instances mean the
+        // request was re-created after an edit, and a retained location would be rejected by
+        // ReportDiagnostic because its tree is no longer in the current compilation.
+        ReferenceEquals(left.SourceTree, right.SourceTree) &&
+        left.SourceSpan.Equals(right.SourceSpan) &&
+        left.GetLineSpan().Equals(right.GetLineSpan());
 }

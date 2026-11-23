@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExtensionInfos;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -6,10 +8,33 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Analysis;
 
 internal static class ControlModelBuilder
 {
+    private sealed class ModelHolder
+    {
+        internal ConcurrentDictionary<string, ControlModel> ByAssembly { get; } = new(StringComparer.Ordinal);
+    }
+
+    // Metadata type symbols are reused across compilations that share references. Cache the
+    // resulting model per (symbol, generated assembly identity) so an edit that does not change
+    // a control's API does not rebuild its model and base chain.
+    private static readonly ConditionalWeakTable<INamedTypeSymbol, ModelHolder> ModelCache = new();
+
     internal static ControlModel Build(INamedTypeSymbol type, IAssemblySymbol? generatedAssembly = null)
     {
-        var cache = new Dictionary<INamedTypeSymbol, ControlModel>(SymbolEqualityComparer.Default);
-        return Build(type, generatedAssembly, cache);
+        var assemblyKey = generatedAssembly?.Identity.Name ?? string.Empty;
+        var holder = ModelCache.GetValue(type, _ => new ModelHolder());
+        if (holder.ByAssembly.TryGetValue(assemblyKey, out var cached))
+        {
+            return cached;
+        }
+
+        var perBuild = new Dictionary<INamedTypeSymbol, ControlModel>(SymbolEqualityComparer.Default);
+        var model = Build(type, generatedAssembly, perBuild);
+        foreach (var pair in perBuild)
+        {
+            ModelCache.GetValue(pair.Key, _ => new ModelHolder()).ByAssembly[assemblyKey] = pair.Value;
+        }
+
+        return model;
     }
 
     /// <summary>
@@ -178,18 +203,39 @@ internal static class ControlModelBuilder
 
     private static PropertyModel[] BuildDeclaredProperties(INamedTypeSymbol type, ControlModel? baseType)
     {
-        var inheritedByName = baseType?.Properties
-            .GroupBy(static property => property.Name, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => group.First(), StringComparer.Ordinal)
-            ?? new Dictionary<string, PropertyModel>(StringComparer.Ordinal);
+        var inheritedByName = new Dictionary<string, PropertyModel>(StringComparer.Ordinal);
+        if (baseType is not null)
+        {
+            foreach (var property in baseType.Properties)
+            {
+                if (!inheritedByName.ContainsKey(property.Name))
+                {
+                    inheritedByName.Add(property.Name, property);
+                }
+            }
+        }
+
+        // One member scan and one name lookup instead of GetMembers() per CLR property.
+        var members = type.GetMembers();
+        var fieldsByName = new Dictionary<string, IFieldSymbol>(StringComparer.Ordinal);
+        foreach (var member in members)
+        {
+            if (member is IFieldSymbol field && !fieldsByName.ContainsKey(field.Name))
+            {
+                fieldsByName.Add(field.Name, field);
+            }
+        }
+
+        IFieldSymbol? FindAvaloniaField(string propertyName) =>
+            fieldsByName.TryGetValue(propertyName + "Property", out var field) && field.IsAvaloniaPropertyField()
+                ? field
+                : null;
 
         var declared = new Dictionary<string, PropertyModel>(StringComparer.Ordinal);
-        foreach (var property in type.GetMembers().OfType<IPropertySymbol>()
+        foreach (var property in members.OfType<IPropertySymbol>()
                      .Where(static property => property.DeclaredAccessibility == Accessibility.Public && !property.IsStatic))
         {
-            var avaloniaField = type.GetMembers(property.Name + "Property")
-                .OfType<IFieldSymbol>()
-                .FirstOrDefault(static field => field.IsAvaloniaPropertyField());
+            var avaloniaField = FindAvaloniaField(property.Name);
             var propertyMetadata = GetMetadata(property);
             var fieldMetadata = avaloniaField is null ? default : GetMetadata(avaloniaField);
             var inheritanceKind = GetInheritanceKind(property.IsOverride, inheritedByName.ContainsKey(property.Name));
@@ -205,24 +251,29 @@ internal static class ControlModelBuilder
                 propertyMetadata.Ignore || fieldMetadata.Ignore);
         }
 
-        foreach (var field in type.GetMembers().OfType<IFieldSymbol>()
-                     .Where(static field => field.IsAvaloniaPropertyField()))
+        foreach (var field in members.OfType<IFieldSymbol>())
         {
+            if (!field.IsAvaloniaPropertyField())
+            {
+                continue;
+            }
+
             var name = field.GetMemberName();
+            var fieldMetadata = GetMetadata(field);
             if (declared.TryGetValue(name, out var existing))
             {
                 if (existing.AvaloniaPropertyField is null)
                 {
                     declared[name] = new PropertyModel(
                         existing.Name,
-                        GetMetadata(field).Alias ?? existing.ExtensionName,
+                        fieldMetadata.Alias ?? existing.ExtensionName,
                         type,
                         existing.ClrProperty,
                         field,
                         field.Type.GetLastGenericArgument(),
                         existing.InheritanceKind,
                         GetOwnershipKind(field),
-                        existing.IsIgnored || GetMetadata(field).Ignore);
+                        existing.IsIgnored || fieldMetadata.Ignore);
                 }
 
                 continue;
@@ -232,7 +283,7 @@ internal static class ControlModelBuilder
             var ownershipKind = GetOwnershipKind(field);
             declared[name] = new PropertyModel(
                 name,
-                GetMetadata(field).Alias ?? name,
+                fieldMetadata.Alias ?? name,
                 type,
                 null,
                 field,
@@ -243,7 +294,7 @@ internal static class ControlModelBuilder
                         ? PropertyInheritanceKind.Inherited
                         : PropertyInheritanceKind.Shadow,
                 ownershipKind,
-                GetMetadata(field).Ignore);
+                fieldMetadata.Ignore);
         }
 
         return declared.Values.ToArray();
@@ -290,11 +341,28 @@ internal static class ControlModelBuilder
         return fields.Where(static field => field.IsAcceptableStyledField()).ToArray();
     }
 
-    internal static GeneratorMetadata GetMetadata(ISymbol symbol)
+    private const string MetadataAttributeName = "SVCSystemsCSharpUIGeneratorMetadataAttribute";
+    private const string MetadataAttributeFullName = "SVCSystems.Avalonia.CSharpUI." + MetadataAttributeName;
+    private sealed class MetadataHolder(GeneratorMetadata metadata)
+    {
+        internal GeneratorMetadata Metadata { get; } = metadata;
+    }
+
+    private static readonly ConditionalWeakTable<ISymbol, MetadataHolder> MetadataCache = new();
+
+    internal static GeneratorMetadata GetMetadata(ISymbol symbol) =>
+        MetadataCache.GetValue(symbol, static value => new MetadataHolder(ReadMetadata(value))).Metadata;
+
+    private static GeneratorMetadata ReadMetadata(ISymbol symbol)
     {
         foreach (var attribute in symbol.GetAttributes())
         {
-            if (attribute.AttributeClass?.ToDisplayString() != "SVCSystems.Avalonia.CSharpUI.SVCSystemsCSharpUIGeneratorMetadataAttribute")
+            // Attribute decoding is expensive; the simple name rejects almost every attribute
+            // without formatting it. Only matching names pay for the full metadata-name check.
+            var attributeClass = attribute.AttributeClass;
+            if (attributeClass is null ||
+                attributeClass.Name != MetadataAttributeName ||
+                attributeClass.ToDisplayString() != MetadataAttributeFullName)
             {
                 continue;
             }
@@ -337,30 +405,35 @@ internal static class ControlModelBuilder
             .Select(static variable => variable.Initializer?.Value)
             .FirstOrDefault(static value => value is not null);
 
-        var invokedMethodNames = initializer?.DescendantNodesAndSelf()
-            .OfType<InvocationExpressionSyntax>()
-            .Select(static invocation => invocation.Expression switch
+        if (initializer is not null)
+        {
+            // Early exit on the first match; the old code built a string array for every field.
+            if (HasInvocation(initializer, "AddOwner"))
             {
-                MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText,
-                IdentifierNameSyntax identifier => identifier.Identifier.ValueText,
-                _ => string.Empty
-            })
-            .ToArray() ?? [];
+                return AvaloniaPropertyOwnershipKind.AddedOwner;
+            }
 
-        if (invokedMethodNames.Contains("AddOwner", StringComparer.Ordinal))
-        {
-            return AvaloniaPropertyOwnershipKind.AddedOwner;
-        }
-
-        if (invokedMethodNames.Contains("OverrideMetadata", StringComparer.Ordinal))
-        {
-            return AvaloniaPropertyOwnershipKind.MetadataOverride;
+            if (HasInvocation(initializer, "OverrideMetadata"))
+            {
+                return AvaloniaPropertyOwnershipKind.MetadataOverride;
+            }
         }
 
         return field.ContainingType is null
             ? AvaloniaPropertyOwnershipKind.Inherited
             : AvaloniaPropertyOwnershipKind.Registered;
     }
+
+    private static bool HasInvocation(SyntaxNode initializer, string methodName) =>
+        initializer.DescendantNodesAndSelf()
+            .OfType<InvocationExpressionSyntax>()
+            .Any(invocation =>
+                invocation.Expression switch
+                {
+                    MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText,
+                    IdentifierNameSyntax identifier => identifier.Identifier.ValueText,
+                    _ => string.Empty
+                } == methodName);
 }
 
 internal readonly struct GeneratorMetadata(bool ignore, bool generateFactory, string? alias)

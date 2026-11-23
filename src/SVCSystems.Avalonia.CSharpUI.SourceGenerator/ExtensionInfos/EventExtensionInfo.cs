@@ -35,7 +35,9 @@ internal sealed class EventExtensionInfo : IMemberExtensionInfo
         EventHandler = eventInfo.Type.GetFullTypeName();
         XmlDoc = SymbolUtilities.FormatXmlDoc(eventInfo, compilation);
         IsObsolete = eventInfo.IsObsolete();
-        IsRoutedEvent = IsRoutedEventSymbol(eventInfo);
+        var delegateType = eventInfo.Type as INamedTypeSymbol;
+        var invokeMethod = delegateType?.DelegateInvokeMethod;
+        IsRoutedEvent = IsRoutedEventSymbol(eventInfo, invokeMethod);
         SupportsAddHandler = eventInfo.ContainingType.IsOrInheritsFrom("Avalonia.Interactivity.Interactive");
 
         if (!eventInfo.ContainingType.IsSealed)
@@ -49,7 +51,7 @@ internal sealed class EventExtensionInfo : IMemberExtensionInfo
             ReturnType = ControlTypeName;
         }
 
-        if (eventInfo.Type is INamedTypeSymbol delegateType && delegateType.DelegateInvokeMethod is { } invokeMethod)
+        if (invokeMethod is not null)
         {
             ReturnsVoid = invokeMethod.ReturnsVoid;
 
@@ -60,9 +62,9 @@ internal sealed class EventExtensionInfo : IMemberExtensionInfo
         }
     }
 
-    private static bool IsRoutedEventSymbol(IEventSymbol eventInfo)
+    private static bool IsRoutedEventSymbol(IEventSymbol eventInfo, IMethodSymbol? invokeMethod)
     {
-        if (eventInfo.Type is not INamedTypeSymbol delegateType || delegateType.DelegateInvokeMethod is not { } invokeMethod)
+        if (invokeMethod is null)
         {
             return false;
         }

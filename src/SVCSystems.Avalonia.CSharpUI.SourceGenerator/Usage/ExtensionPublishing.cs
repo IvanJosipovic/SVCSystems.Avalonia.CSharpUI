@@ -1,7 +1,16 @@
+using System.Collections.Concurrent;
 using System.Text;
 using Microsoft.CodeAnalysis;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
+
+/// <summary>Coverage data derived only from referenced assemblies; safe to key by reference hash.</summary>
+internal sealed class ReferencedCoverageData
+{
+    internal HashSet<string> ReferencedCoverage { get; } = new(StringComparer.Ordinal);
+    internal Dictionary<string, string> CoverageOrigins { get; } = new(StringComparer.Ordinal);
+    internal HashSet<string> OverlappingPublisherKeys { get; } = new(StringComparer.Ordinal);
+}
 
 /// <summary>
 /// Describes how a compilation participates in shared public markup extensions.
@@ -11,11 +20,15 @@ internal sealed class ExtensionPublishingPolicy
     internal ExtensionPublishingPolicy(
         bool isPublisher,
         HashSet<TypeKey>? restrictedRoots,
-        string assemblyName)
+        string assemblyName,
+        ReferencedCoverageData coverage)
     {
         IsPublisher = isPublisher;
         RestrictedRoots = restrictedRoots;
         AssemblyName = assemblyName;
+        ReferencedCoverage = coverage.ReferencedCoverage;
+        CoverageOrigins = coverage.CoverageOrigins;
+        OverlappingPublisherKeys = coverage.OverlappingPublisherKeys;
     }
 
     /// <summary>Whether this assembly opted in to publishing its generated extensions.</summary>
@@ -25,19 +38,19 @@ internal sealed class ExtensionPublishingPolicy
     internal string AssemblyName { get; }
 
     /// <summary>Control keys already published by assemblies referenced by this compilation.</summary>
-    internal HashSet<string> ReferencedCoverage { get; } = new(StringComparer.Ordinal);
+    internal HashSet<string> ReferencedCoverage { get; }
 
     /// <summary>
     /// The assembly that actually defines the public extensions for each covered key. Keys that
     /// are only propagated through publisher chains keep the origin of the original publisher.
     /// </summary>
-    internal Dictionary<string, string> CoverageOrigins { get; } = new(StringComparer.Ordinal);
+    internal Dictionary<string, string> CoverageOrigins { get; }
 
     /// <summary>
     /// Keys claimed by more than one independent publisher. A consumer of both assemblies would
     /// see duplicate public extension methods and fail with CS0121.
     /// </summary>
-    internal HashSet<string> OverlappingPublisherKeys { get; } = new(StringComparer.Ordinal);
+    internal HashSet<string> OverlappingPublisherKeys { get; }
 
     /// <summary>
     /// When the opt-in attribute names controls explicitly, only those controls and their base
@@ -59,6 +72,9 @@ internal static class ExtensionPublishing
     private const string CoverageAttributeName =
         "SVCSystems.Avalonia.CSharpUI.PublicMarkupExtensionControlsAttribute";
 
+    private const string PublishAttributeShortName = "GeneratePublicMarkupExtensionsAttribute";
+    private const string CoverageAttributeShortName = "PublicMarkupExtensionControlsAttribute";
+
     // Coverage entries are emitted as "originPublisher::TypeKey". TypeKey itself contains '|',
     // so this separator keeps the defining publisher distinguishable from propagated coverage.
     private const string CoverageOriginSeparator = "::";
@@ -67,28 +83,60 @@ internal static class ExtensionPublishing
     // suppress local generation but never trigger a false overlap diagnostic.
     private const string UnknownOrigin = "";
 
-    internal static ExtensionPublishingPolicy Read(Compilation compilation)
-    {
-        var assemblyName = compilation.Assembly.Identity.Name ?? string.Empty;
-        var policy = new ExtensionPublishingPolicy(
-            isPublisher: false, restrictedRoots: null, assemblyName: assemblyName);
+    // Only data derived from referenced assemblies is cached by reference hash. Local opt-in
+    // settings are always read from the current compilation so they cannot become stale.
+    private static readonly ConcurrentDictionary<ulong, ReferencedCoverageData> CoverageCache = new();
 
+    internal static ExtensionPublishingPolicy Read(
+        Compilation compilation,
+        CancellationToken cancellationToken = default,
+        ulong referenceHash = 0)
+    {
+        ReferencedCoverageData coverage;
+        if (referenceHash != 0 && CoverageCache.TryGetValue(referenceHash, out var cached))
+        {
+            coverage = cached;
+        }
+        else
+        {
+            coverage = ReadReferencedCoverage(compilation, cancellationToken);
+            if (referenceHash != 0)
+            {
+                if (CoverageCache.Count > 8)
+                {
+                    CoverageCache.Clear();
+                }
+
+                coverage = CoverageCache.GetOrAdd(referenceHash, coverage);
+            }
+        }
+
+        var assemblyName = compilation.Assembly.Identity.Name ?? string.Empty;
+        var isPublisher = false;
+        HashSet<TypeKey>? restrictedRoots = null;
         foreach (var attribute in compilation.Assembly.GetAttributes())
         {
-            if (!IsAttribute(attribute, PublishAttributeName))
+            if (!IsAttribute(attribute, PublishAttributeName, PublishAttributeShortName))
             {
                 continue;
             }
 
-            policy = new ExtensionPublishingPolicy(
-                isPublisher: true,
-                restrictedRoots: ReadRootControls(attribute),
-                assemblyName: assemblyName);
+            isPublisher = true;
+            restrictedRoots = ReadRootControls(attribute);
             break;
         }
 
+        return new ExtensionPublishingPolicy(isPublisher, restrictedRoots, assemblyName, coverage);
+    }
+
+    private static ReferencedCoverageData ReadReferencedCoverage(
+        Compilation compilation,
+        CancellationToken cancellationToken)
+    {
+        var coverage = new ReferencedCoverageData();
         foreach (var reference in compilation.References)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (compilation.GetAssemblyOrModuleSymbol(reference) is not IAssemblySymbol assembly ||
                 SymbolEqualityComparer.Default.Equals(assembly, compilation.Assembly))
             {
@@ -97,16 +145,16 @@ internal static class ExtensionPublishing
 
             foreach (var attribute in assembly.GetAttributes())
             {
-                if (!IsAttribute(attribute, CoverageAttributeName))
+                if (!IsAttribute(attribute, CoverageAttributeName, CoverageAttributeShortName))
                 {
                     continue;
                 }
 
                 foreach (var entry in ReadCoverageEntries(attribute))
                 {
-                    policy.ReferencedCoverage.Add(entry.Key);
+                    coverage.ReferencedCoverage.Add(entry.Key);
 
-                    if (policy.CoverageOrigins.TryGetValue(entry.Key, out var existingOrigin))
+                    if (coverage.CoverageOrigins.TryGetValue(entry.Key, out var existingOrigin))
                     {
                         // The same origin through several references is propagation. An unknown
                         // (legacy) origin cannot be attributed, so it is excluded from the check.
@@ -114,23 +162,23 @@ internal static class ExtensionPublishing
                             entry.Origin != UnknownOrigin &&
                             !string.Equals(existingOrigin, entry.Origin, StringComparison.Ordinal))
                         {
-                            policy.OverlappingPublisherKeys.Add(entry.Key);
+                            coverage.OverlappingPublisherKeys.Add(entry.Key);
                         }
 
                         if (existingOrigin == UnknownOrigin && entry.Origin != UnknownOrigin)
                         {
-                            policy.CoverageOrigins[entry.Key] = entry.Origin;
+                            coverage.CoverageOrigins[entry.Key] = entry.Origin;
                         }
                     }
                     else
                     {
-                        policy.CoverageOrigins.Add(entry.Key, entry.Origin);
+                        coverage.CoverageOrigins.Add(entry.Key, entry.Origin);
                     }
                 }
             }
         }
 
-        return policy;
+        return coverage;
     }
 
     /// <summary>
@@ -151,8 +199,13 @@ internal static class ExtensionPublishing
         return source.ToString();
     }
 
-    private static bool IsAttribute(AttributeData attribute, string metadataName) =>
-        attribute.AttributeClass?.ToDisplayString() == metadataName;
+    private static bool IsAttribute(AttributeData attribute, string metadataName, string shortName)
+    {
+        var attributeClass = attribute.AttributeClass;
+        return attributeClass is not null &&
+               attributeClass.Name == shortName &&
+               attributeClass.ToDisplayString() == metadataName;
+    }
 
     private static HashSet<TypeKey>? ReadRootControls(AttributeData attribute)
     {
