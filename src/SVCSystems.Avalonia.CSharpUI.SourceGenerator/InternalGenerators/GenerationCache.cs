@@ -35,11 +35,11 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
     private const ulong Offset2 = 14695981039346656011UL;
     private const ulong Prime2 = 1099511628217UL;
 
-    private sealed class StringBox
+    private sealed class UlongBox
     {
-        internal StringBox(string value) => Value = value;
+        internal UlongBox(ulong value) => Value = value;
 
-        internal string Value { get; }
+        internal ulong Value { get; }
     }
 
     private sealed class TreeHash
@@ -48,7 +48,10 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
         internal ulong Hash2;
     }
 
-    private static readonly ConditionalWeakTable<PortableExecutableReference, StringBox> MetadataIdCache = new();
+    // Metadata.Id does not override ToString(), so its string form is the same for every
+    // reference. GetHashCode() is derived from the metadata content and is what distinguishes
+    // two images of different assemblies (or different versions of the same assembly).
+    private static readonly ConditionalWeakTable<PortableExecutableReference, UlongBox> MetadataIdHashCache = new();
 
     // Roslyn reuses the same SyntaxTree instance for every file that the user did not edit.
     // Caching each tree's token hash means an edit only rehashes the edited file instead of
@@ -92,31 +95,23 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
         foreach (var reference in compilation.References)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            // Display distinguishes file references by path and keeps references that cannot be
+            // opened from colliding with each other.
+            Add(ref hash, reference.Display ?? string.Empty);
+
             if (reference is PortableExecutableReference portable)
             {
                 try
                 {
-                    // Metadata.Id is derived from the assembly content; hashing the display path
-                    // as well would double the work without changing the identified symbol set.
-                    var id = MetadataIdCache.GetValue(portable, static reference =>
-                        new StringBox(reference.GetMetadata()?.Id.ToString() ?? string.Empty)).Value;
-                    if (id.Length > 0)
-                    {
-                        Add(ref hash, id);
-                    }
-                    else
-                    {
-                        Add(ref hash, reference.Display ?? string.Empty);
-                    }
+                    var metadataHash = MetadataIdHashCache.GetValue(portable, static reference =>
+                        new UlongBox((ulong)(reference.GetMetadata()?.Id.GetHashCode() ?? 0))).Value;
+                    Add(ref hash, metadataHash.ToString("x"));
                 }
                 catch (Exception exception) when (exception is BadImageFormatException or IOException)
                 {
-                    Add(ref hash, reference.Display ?? string.Empty);
+                    // A reference that cannot be opened is already identified by Display.
                 }
-            }
-            else
-            {
-                Add(ref hash, reference.Display ?? string.Empty);
             }
         }
 
