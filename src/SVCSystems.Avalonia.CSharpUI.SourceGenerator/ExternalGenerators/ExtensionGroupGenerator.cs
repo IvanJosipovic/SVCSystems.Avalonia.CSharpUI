@@ -31,15 +31,19 @@ internal sealed class ExtensionGroupGenerator(
                     continue;
                 }
 
-                var extensionCode = generator.GetExtension(extensionInfo);
-                if (string.IsNullOrWhiteSpace(extensionCode))
+                var lengthBefore = sb.Length;
+                sb.AppendLine();
+                sb.AppendLine($"/*{generator.GetType().Name}*/");
+                var headerLength = sb.Length - lengthBefore;
+                generator.AppendExtension(sb, extensionInfo);
+                if (sb.Length == lengthBefore + headerLength)
                 {
+                    // Nothing was emitted; roll the header back to keep output identical.
+                    sb.Length = lengthBefore;
                     continue;
                 }
 
                 sb.AppendLine();
-                sb.AppendLine($"/*{generator.GetType().Name}*/");
-                sb.AppendLine(extensionCode);
                 generationsCount++;
             }
 

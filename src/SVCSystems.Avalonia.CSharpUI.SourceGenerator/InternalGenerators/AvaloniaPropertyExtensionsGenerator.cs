@@ -21,53 +21,18 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
 #endif
         Debug.WriteLine("Initialize AvaloniaPropertyExtensionsGenerator code generator");
 
-        var classDeclarations = context.SyntaxProvider
-            .CreateSyntaxProvider(
-                predicate: static (s, _) => s is ClassDeclarationSyntax,
-                transform: static (ctx, _) => GetSemanticTarget(ctx))
-            .Where(static c => c is not null)
-            .Select(static (c, _) => c!.Value)
-            .WithComparer(PropertyGenerationTargetComparer.Instance);
-
-        context.RegisterSourceOutput(classDeclarations,
-            static (spc, target) => GenerateSource(spc, target));
+        // Shares one class-declaration pass with the event generator when both are registered.
+        ViewExtensionGenerator.Register(context, emitPropertyExtensions: true, emitEventExtensions: false);
     }
 
-    private static PropertyGenerationTarget? GetSemanticTarget(GeneratorSyntaxContext context)
+    internal static string? GenerateSource(
+        ClassDeclarationSyntax type,
+        SemanticModel semanticModel,
+        INamedTypeSymbol typeSymbol,
+        CancellationToken cancellationToken)
     {
-        var classDecl = (ClassDeclarationSyntax)context.Node;
-        var symbol = context.SemanticModel.GetDeclaredSymbol(classDecl);
-        
-        // Check if this class or any of its base types implements IDeclarativeViewBase
-        return symbol is INamedTypeSymbol typeSymbol &&
-               ImplementsIDeclarativeViewBase(typeSymbol)
-            ? PropertyGenerationTarget.Create(classDecl, context.SemanticModel, typeSymbol)
-            : null;
-    }
-
-    private static bool ImplementsIDeclarativeViewBase(INamedTypeSymbol typeSymbol)
-    {
-        // Check direct interfaces
-        if (typeSymbol.AllInterfaces.Any(x => x.Name == "IDeclarativeViewBase"))
-            return true;
-
-        // Check base types (for inheritance)
-        var current = typeSymbol.BaseType;
-        while (current != null)
-        {
-            if (current.AllInterfaces.Any(x => x.Name == "IDeclarativeViewBase"))
-                return true;
-            current = current.BaseType;
-        }
-
-        return false;
-    }
-
-    private static void GenerateSource(SourceProductionContext context, PropertyGenerationTarget target)
-    {
-        var type = target.Syntax;
-        var semanticModel = target.SemanticModel;
-        var root = type.SyntaxTree.GetRoot();
+        cancellationToken.ThrowIfCancellationRequested();
+        var root = type.SyntaxTree.GetRoot(cancellationToken);
         var ns = root.DescendantNodes()
             .FirstOrDefault(x => x is BaseNamespaceDeclarationSyntax) as BaseNamespaceDeclarationSyntax;
 
@@ -95,10 +60,10 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
             AppendUsingDirective(sb, emittedUsings, $"using {typeNamespace};");
 
         // Build the extension class name - handle nested classes properly
-        var extensionClassName = target.ExtensionClassName;
-        
+        var extensionClassName = BuildExtensionClassName(typeSymbol);
+
         // Fully qualified control type name including namespace, containing types and type parameters
-        var controlTypeQualified = GetControlTypeQualifiedName(target.TypeSymbol);
+        var controlTypeQualified = GetControlTypeQualifiedName(typeSymbol);
 
         // Build method generic parameters for all containing type parameters (outermost -> innermost)
         string allTypeParamsForMethods = BuildAllTypeParameters(type);
@@ -144,69 +109,11 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
 
         sb.AppendLine("}");
 
-        if (processedFields.Count > 0)
-        {
-            context.AddSource(target.HintName, SourceText.From(sb.ToString(), Encoding.UTF8));
-        }
+        return processedFields.Count > 0 ? sb.ToString() : null;
     }
 
-    private readonly struct PropertyGenerationTarget
-    {
-        public PropertyGenerationTarget(
-            ClassDeclarationSyntax syntax,
-            SemanticModel semanticModel,
-            INamedTypeSymbol typeSymbol,
-            string extensionClassName,
-            string hintName,
-            string signature)
-        {
-            Syntax = syntax;
-            SemanticModel = semanticModel;
-            TypeSymbol = typeSymbol;
-            ExtensionClassName = extensionClassName;
-            HintName = hintName;
-            Signature = signature;
-        }
-
-        public ClassDeclarationSyntax Syntax { get; }
-
-        public SemanticModel SemanticModel { get; }
-
-        public INamedTypeSymbol TypeSymbol { get; }
-
-        public string ExtensionClassName { get; }
-
-        public string HintName { get; }
-
-        public string Signature { get; }
-
-        public static PropertyGenerationTarget Create(ClassDeclarationSyntax syntax, SemanticModel semanticModel, INamedTypeSymbol typeSymbol)
-        {
-            var extensionClassName = BuildExtensionClassName(typeSymbol);
-            var hintName = SymbolUtilities.RemoveIllegalFileNameCharacters(extensionClassName) + "Extensions.g.cs";
-            var signature = CreateSignature(syntax, semanticModel, typeSymbol);
-
-            return new PropertyGenerationTarget(syntax, semanticModel, typeSymbol, extensionClassName, hintName, signature);
-        }
-    }
-
-    private sealed class PropertyGenerationTargetComparer : IEqualityComparer<PropertyGenerationTarget>
-    {
-        internal static readonly PropertyGenerationTargetComparer Instance = new();
-
-        public bool Equals(PropertyGenerationTarget x, PropertyGenerationTarget y) =>
-            StringComparer.Ordinal.Equals(x.HintName, y.HintName) &&
-            StringComparer.Ordinal.Equals(x.Signature, y.Signature);
-
-        public int GetHashCode(PropertyGenerationTarget obj)
-        {
-            unchecked
-            {
-                return (StringComparer.Ordinal.GetHashCode(obj.HintName) * 397) ^
-                    StringComparer.Ordinal.GetHashCode(obj.Signature);
-            }
-        }
-    }
+    internal static string GetHintName(INamedTypeSymbol typeSymbol) =>
+        SymbolUtilities.RemoveIllegalFileNameCharacters(BuildExtensionClassName(typeSymbol)) + "Extensions.g.cs";
 
     private static string BuildExtensionClassName(INamedTypeSymbol? typeSymbol)
     {
@@ -229,7 +136,7 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
             current = current.ContainingType;
         }
         
-        return CleanIdentifier(string.Join("_", parts)) ?? "Unknown";
+        return SymbolUtilities.CleanIdentifier(string.Join("_", parts)) ?? "Unknown";
     }
 
     private static string BuildAllTypeParameters(ClassDeclarationSyntax type)
@@ -263,205 +170,6 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
             SymbolDisplayFormat.FullyQualifiedFormat
                 .WithGenericsOptions(SymbolDisplayGenericsOptions.IncludeTypeParameters | SymbolDisplayGenericsOptions.IncludeVariance)
                 .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.UseSpecialTypes | SymbolDisplayMiscellaneousOptions.ExpandNullable));
-
-    private static string CreateSignature(ClassDeclarationSyntax type, SemanticModel semanticModel, INamedTypeSymbol typeSymbol)
-    {
-        var signature = new StringBuilder(1024);
-        AppendSignaturePart(signature, GetControlTypeQualifiedName(typeSymbol));
-        AppendSignaturePart(signature, typeSymbol.ContainingNamespace?.ToDisplayString());
-
-        if (type.SyntaxTree.GetRoot() is CompilationUnitSyntax compilationUnit)
-        {
-            foreach (var usingDirective in compilationUnit.Usings)
-            {
-                AppendSyntaxFingerprint(signature, usingDirective);
-            }
-        }
-
-        AppendSyntaxFingerprint(signature, type.Modifiers);
-        AppendSyntaxFingerprint(signature, type.TypeParameterList);
-        foreach (var constraintClause in type.ConstraintClauses)
-        {
-            AppendSyntaxFingerprint(signature, constraintClause);
-        }
-
-        var members = type.Members;
-        var processedFields = new HashSet<string>(StringComparer.Ordinal);
-
-        foreach (var field in members.OfType<FieldDeclarationSyntax>())
-        {
-            if (field.Declaration.Type is GenericNameSyntax { Identifier.ValueText: "DirectProperty" or "StyledProperty" or "AttachedProperty" }
-                && HasAvaloniaPropertyPublicSetter(field, members))
-            {
-                AppendFieldSignature(signature, field, semanticModel);
-                processedFields.Add(field.Declaration.Variables[0].Identifier.ValueText);
-            }
-        }
-
-        foreach (var property in members.OfType<PropertyDeclarationSyntax>())
-        {
-            var propertyName = property.Identifier.ValueText;
-            if (!processedFields.Contains(propertyName + "Property")
-                && IsPublic(property)
-                && HasPublicSetter(property)
-                && IsCommonInstanceProperty(property, members))
-            {
-                AppendPropertySignature(signature, property, semanticModel);
-                processedFields.Add(propertyName);
-            }
-        }
-
-        return signature.ToString();
-    }
-
-    private static void AppendFieldSignature(StringBuilder signature, FieldDeclarationSyntax field, SemanticModel semanticModel)
-    {
-        AppendSignaturePart(signature, "field");
-        AppendSyntaxFingerprint(signature, field.Modifiers);
-        AppendSyntaxFingerprint(signature, field.Declaration.Type);
-
-        foreach (var variable in field.Declaration.Variables)
-        {
-            AppendSignaturePart(signature, variable.Identifier.ValueText);
-
-            if (semanticModel.GetDeclaredSymbol(variable) is IFieldSymbol fieldSymbol)
-            {
-                AppendSignaturePart(signature, fieldSymbol.Type.GetFullTypeName());
-                AppendSignaturePart(signature, fieldSymbol.Type.GetLastGenericArgument().GetFullTypeName());
-                AppendSignaturePart(signature, fieldSymbol.GetGeneratedXmlDoc(semanticModel.Compilation));
-            }
-        }
-    }
-
-    private static void AppendPropertySignature(StringBuilder signature, PropertyDeclarationSyntax property, SemanticModel semanticModel)
-    {
-        AppendSignaturePart(signature, "property");
-        AppendSyntaxFingerprint(signature, property.Modifiers);
-        AppendSyntaxFingerprint(signature, property.Type);
-        AppendSignaturePart(signature, property.Identifier.ValueText);
-        // The generated binding expression depends on this classification, which is not part of
-        // the modifier/accessor syntax fingerprints (attributes live on their own syntax nodes).
-        AppendSignaturePart(signature, IsAvaloniaGeneratedProperty(property, semanticModel) ? "avalonia-generated" : "plain");
-
-        if (property.AccessorList is { } accessorList)
-        {
-            foreach (var accessor in accessorList.Accessors)
-            {
-                AppendSignaturePart(signature, accessor.Keyword.ValueText);
-                AppendSyntaxFingerprint(signature, accessor.Modifiers);
-            }
-        }
-
-        if (property.ExpressionBody is not null)
-        {
-            AppendSignaturePart(signature, "expr");
-        }
-
-        if (semanticModel.GetDeclaredSymbol(property) is IPropertySymbol propertySymbol)
-        {
-            AppendSignaturePart(signature, propertySymbol.Type.GetFullTypeName());
-            AppendSignaturePart(signature, SymbolUtilities.FormatXmlDoc(propertySymbol, semanticModel.Compilation));
-        }
-    }
-
-    private static void AppendSyntaxFingerprint(StringBuilder signature, SyntaxNode? node)
-    {
-        if (node is null)
-        {
-            signature.Append('\u001E');
-            return;
-        }
-
-        signature.Append(node.RawKind);
-        signature.Append('\u001F');
-
-        foreach (var token in node.DescendantTokens(descendIntoTrivia: false))
-        {
-            signature.Append(token.Text);
-            signature.Append('\u001F');
-        }
-
-        signature.Append('\u001E');
-    }
-
-    private static void AppendSyntaxFingerprint(StringBuilder signature, SyntaxTokenList tokens)
-    {
-        foreach (var token in tokens)
-        {
-            signature.Append(token.Text);
-            signature.Append('\u001F');
-        }
-
-        signature.Append('\u001E');
-    }
-
-    private static void AppendSignaturePart(StringBuilder signature, string? value)
-    {
-        if (!string.IsNullOrEmpty(value))
-        {
-            signature.Append(value);
-        }
-
-        signature.Append('\u001F');
-    }
-
-    private static string? CleanIdentifier(string name, bool @namespace = false)
-    {
-        // trim off leading and trailing whitespace
-        name = name.Trim();
-
-        if (string.IsNullOrEmpty(name))
-        {
-            return null;
-        }
-
-        var sb = new StringBuilder();
-        if (!SyntaxFacts.IsIdentifierStartCharacter(name[0]))
-        {
-            // the first characters
-            sb.Append('_');
-        }
-
-        foreach (var ch in name)
-        {
-            if (SyntaxFacts.IsIdentifierPartCharacter(ch) || (@namespace && ch == '.'))
-            {
-                sb.Append(ch);
-            }
-        }
-
-        var result = sb.ToString();
-
-        if (SyntaxFacts.GetKeywordKind(result) != SyntaxKind.None)
-        {
-            result = '@' + result;
-        }
-
-        if (@namespace)
-        {
-            var newResult = string.Empty;
-            foreach (var chunk in result.Split('.'))
-            {
-                if (!string.IsNullOrEmpty(newResult))
-                {
-                    newResult += '.';
-                }
-
-                if (SyntaxFacts.GetKeywordKind(chunk) != SyntaxKind.None)
-                {
-                    newResult += '@' + chunk;
-                }
-                else
-                {
-                    newResult += chunk;
-                }
-            }
-
-            return newResult;
-        }
-
-        return result;
-    }
 
     private static void AppendIfNotNull(StringBuilder sb, string value)
     {

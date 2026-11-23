@@ -18,5 +18,6 @@ internal static class UsageNameProvider
                 predicate: static (node, _) => node is SimpleNameSyntax,
                 transform: static (syntaxContext, _) =>
                     ((SimpleNameSyntax)syntaxContext.Node).Identifier.ValueText)
-            .Where(static name => !string.IsNullOrWhiteSpace(name));
+            .Where(static name => !string.IsNullOrWhiteSpace(name))
+            .WithTrackingName("Usage.Names");
 }

@@ -46,12 +46,26 @@ internal static class BenchmarkWorkload
 
     internal static Compilation[] NameVariants { get; } = CreateVariants("name");
 
+    /// <summary>Compilation that exercises XamlResourceGenerator with a real compiled-XAML factory.</summary>
+    internal static Compilation Xaml { get; } = CreateXamlCompilation();
+
     private static Compilation[] CreateVariants(string prefix) =>
         Enumerable.Range(0, 8)
             .Select(index => CreateCompilation(editableSuffix: $"int {prefix}{index} = {index};"))
             .ToArray();
 
     internal static string EditableTreePath => EditableFileName;
+
+    private static Compilation CreateXamlCompilation()
+    {
+        const string prefix = "avares://SVCSystems.Avalonia.CSharpUI.Tests.XamlFixtures/";
+        var source =
+            $"[assembly: SVCSystems.Avalonia.CSharpUI.GenerateXamlResource(\"{prefix}Resources.axaml\", \"GeneratedResources\")]\n" +
+            "[assembly: System.Runtime.Versioning.TargetFramework(\".NETCoreApp,Version=v10.0\")]\n";
+        return CSharpCompilation.Create("XamlResourceBenchmark",
+            [CSharpSyntaxTree.ParseText(source, ParseOptions, path: "XamlRequest.cs")],
+            References, new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+    }
 
     private static Compilation CreateCompilation(string editableSuffix)
     {

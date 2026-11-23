@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.CodeAnalysis;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
@@ -12,6 +13,16 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
 internal static class CommonControls
 {
     private const string AttributeName = "SVCSystems.Avalonia.CSharpUI.GenerateMarkupControlAttribute";
+    private const string AttributeShortName = "GenerateMarkupControlAttribute";
+
+    private sealed class Names
+    {
+        internal string[] Values = [];
+    }
+
+    // Metadata assembly symbols are reused across compilations with the same references; decoding
+    // their attributes once removes another full pass over every reference on each generation.
+    private static readonly ConditionalWeakTable<IAssemblySymbol, Names> Cache = new();
 
     internal static HashSet<string> GetTypeNames(Compilation compilation)
     {
@@ -20,9 +31,28 @@ internal static class CommonControls
 
         foreach (var reference in compilation.References)
         {
-            if (compilation.GetAssemblyOrModuleSymbol(reference) is IAssemblySymbol assembly)
+            if (compilation.GetAssemblyOrModuleSymbol(reference) is not IAssemblySymbol assembly)
             {
+                continue;
+            }
+
+            if (SymbolEqualityComparer.Default.Equals(assembly, compilation.Assembly))
+            {
+                // Source assembly symbols change every compilation; read them directly.
                 AddTypes(assembly.GetAttributes(), names);
+                continue;
+            }
+
+            var cached = Cache.GetValue(assembly, static value =>
+            {
+                var local = new HashSet<string>(StringComparer.Ordinal);
+                AddTypes(value.GetAttributes(), local);
+                return new Names { Values = [.. local] };
+            });
+
+            foreach (var name in cached.Values)
+            {
+                names.Add(name);
             }
         }
 
@@ -33,7 +63,10 @@ internal static class CommonControls
     {
         foreach (var attribute in attributes)
         {
-            if (attribute.AttributeClass?.ToDisplayString() != AttributeName ||
+            var attributeClass = attribute.AttributeClass;
+            if (attributeClass is null ||
+                attributeClass.Name != AttributeShortName ||
+                attributeClass.ToDisplayString() != AttributeName ||
                 attribute.ConstructorArguments.Length == 0)
             {
                 continue;

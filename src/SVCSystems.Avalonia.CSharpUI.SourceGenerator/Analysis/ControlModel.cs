@@ -141,6 +141,11 @@ internal sealed class ControlModel(
     bool generateFactory,
     string factoryName)
 {
+    private readonly bool _isAvaloniaObject = type.IsOrInheritsFrom("Avalonia.AvaloniaObject");
+    private readonly bool _isConstructible =
+        !type.IsAbstract && !type.IsGenericType && constructors.Any(static constructor =>
+            constructor.IsAccessibleFromGeneratedCode && constructor.IsParameterless);
+
     internal INamedTypeSymbol Type { get; } = type;
 
     internal ControlModel? BaseType { get; } = baseType;
@@ -173,9 +178,7 @@ internal sealed class ControlModel(
 
     internal string FactoryName { get; } = factoryName;
 
-    internal bool IsAvaloniaObject => Type.IsOrInheritsFrom("Avalonia.AvaloniaObject");
+    internal bool IsAvaloniaObject => _isAvaloniaObject;
 
-    internal bool IsConstructible =>
-        !IsAbstract && !IsGeneric && Constructors.Any(static constructor =>
-            constructor.IsAccessibleFromGeneratedCode && constructor.IsParameterless);
+    internal bool IsConstructible => _isConstructible;
 }

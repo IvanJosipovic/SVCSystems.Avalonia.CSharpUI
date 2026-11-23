@@ -28,6 +28,7 @@ public class GeneratorBenchmarks
         _ = BenchmarkWorkload.NameEdit;
         _ = BenchmarkWorkload.ColdVariants;
         _ = BenchmarkWorkload.NameVariants;
+        _ = BenchmarkWorkload.Xaml;
         _driver = CreateDriver().RunGenerators(BenchmarkWorkload.Base);
         _editIndex = 0;
     }
@@ -49,7 +50,22 @@ public class GeneratorBenchmarks
     public GeneratorDriverRunResult Cold_EventExtensions() =>
         Run(CreateDriver(new AvaloniaEventExtensionsGenerator()), NextColdVariant());
 
+    [Benchmark(Description = "Cold: XAML resource generator only")]
+    public GeneratorDriverRunResult Cold_XamlResources() =>
+        Run(CreateDriver(new XamlResourceGenerator()), BenchmarkWorkload.Xaml);
+
+    [Benchmark(Description = "Cold: combined property + event extensions (one class pass)")]
+    public GeneratorDriverRunResult Cold_CombinedViewExtensions() =>
+        Run(CreateDriver(new CombinedViewAdapter()), NextColdVariant());
+
     // ---------- Incremental (reuse driver, as Roslyn does in the IDE) ----------
+
+    [Benchmark(Description = "Incremental: identical compilation (ideal cache)")]
+    public GeneratorDriverRunResult Incremental_Identical()
+    {
+        _driver = _driver.RunGenerators(BenchmarkWorkload.Base);
+        return _driver.GetRunResult();
+    }
 
     [Benchmark(Description = "Incremental: edit that changes no simple name")]
     public GeneratorDriverRunResult Incremental_IrrelevantEdit()
@@ -97,5 +113,11 @@ public class GeneratorBenchmarks
     {
         public void Initialize(IncrementalGeneratorInitializationContext context) =>
             new UsageDrivenMarkupGenerator().Initialize(context);
+    }
+
+    private sealed class CombinedViewAdapter : IIncrementalGenerator
+    {
+        public void Initialize(IncrementalGeneratorInitializationContext context) =>
+            ViewExtensionGenerator.Register(context, emitPropertyExtensions: true, emitEventExtensions: true);
     }
 }

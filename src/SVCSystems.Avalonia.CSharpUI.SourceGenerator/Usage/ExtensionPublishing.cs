@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using Microsoft.CodeAnalysis;
 
@@ -59,6 +60,9 @@ internal static class ExtensionPublishing
     private const string CoverageAttributeName =
         "SVCSystems.Avalonia.CSharpUI.PublicMarkupExtensionControlsAttribute";
 
+    private const string PublishAttributeShortName = "GeneratePublicMarkupExtensionsAttribute";
+    private const string CoverageAttributeShortName = "PublicMarkupExtensionControlsAttribute";
+
     // Coverage entries are emitted as "originPublisher::TypeKey". TypeKey itself contains '|',
     // so this separator keeps the defining publisher distinguishable from propagated coverage.
     private const string CoverageOriginSeparator = "::";
@@ -67,7 +71,35 @@ internal static class ExtensionPublishing
     // suppress local generation but never trigger a false overlap diagnostic.
     private const string UnknownOrigin = "";
 
-    internal static ExtensionPublishingPolicy Read(Compilation compilation)
+    private static readonly ConcurrentDictionary<ulong, ExtensionPublishingPolicy> PolicyCache = new();
+
+    internal static ExtensionPublishingPolicy Read(
+        Compilation compilation,
+        CancellationToken cancellationToken = default,
+        ulong referenceHash = 0)
+    {
+        if (referenceHash != 0 && PolicyCache.TryGetValue(referenceHash, out var cached))
+        {
+            return cached;
+        }
+
+        var policy = ReadCore(compilation, cancellationToken);
+        if (referenceHash != 0)
+        {
+            if (PolicyCache.Count > 8)
+            {
+                PolicyCache.Clear();
+            }
+
+            PolicyCache.GetOrAdd(referenceHash, policy);
+        }
+
+        return policy;
+    }
+
+    private static ExtensionPublishingPolicy ReadCore(
+        Compilation compilation,
+        CancellationToken cancellationToken)
     {
         var assemblyName = compilation.Assembly.Identity.Name ?? string.Empty;
         var policy = new ExtensionPublishingPolicy(
@@ -75,7 +107,7 @@ internal static class ExtensionPublishing
 
         foreach (var attribute in compilation.Assembly.GetAttributes())
         {
-            if (!IsAttribute(attribute, PublishAttributeName))
+            if (!IsAttribute(attribute, PublishAttributeName, PublishAttributeShortName))
             {
                 continue;
             }
@@ -89,6 +121,7 @@ internal static class ExtensionPublishing
 
         foreach (var reference in compilation.References)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (compilation.GetAssemblyOrModuleSymbol(reference) is not IAssemblySymbol assembly ||
                 SymbolEqualityComparer.Default.Equals(assembly, compilation.Assembly))
             {
@@ -97,7 +130,7 @@ internal static class ExtensionPublishing
 
             foreach (var attribute in assembly.GetAttributes())
             {
-                if (!IsAttribute(attribute, CoverageAttributeName))
+                if (!IsAttribute(attribute, CoverageAttributeName, CoverageAttributeShortName))
                 {
                     continue;
                 }
@@ -151,8 +184,13 @@ internal static class ExtensionPublishing
         return source.ToString();
     }
 
-    private static bool IsAttribute(AttributeData attribute, string metadataName) =>
-        attribute.AttributeClass?.ToDisplayString() == metadataName;
+    private static bool IsAttribute(AttributeData attribute, string metadataName, string shortName)
+    {
+        var attributeClass = attribute.AttributeClass;
+        return attributeClass is not null &&
+               attributeClass.Name == shortName &&
+               attributeClass.ToDisplayString() == metadataName;
+    }
 
     private static HashSet<TypeKey>? ReadRootControls(AttributeData attribute)
     {

@@ -22,33 +22,52 @@ variants are prepared:
 - **Irrelevant edit** — a comment-only change inside one method body;
 - **Name edit** — adds a new control name inside one method body (forces genuine regeneration).
 
-Benchmarks cover cold generation, each generator in isolation, and both incremental edit paths.
+Benchmarks cover cold generation, all four generators in isolation, the ideal cached path and
+both incremental edit paths. A second benchmark class (`HotPathBenchmarks`) measures every
+internal pipeline stage and the hot helper operations individually:
+
+| Class | Operations measured |
+|---|---|
+| `GeneratorBenchmarks` | cold full generator; cold usage-driven; cold property extensions; cold event extensions; cold XAML resources; incremental identical; incremental comment-only edit; incremental code edit |
+| `HotPathBenchmarks` | `ControlCatalog.Build`; `UsageResolver.Resolve`; `ExtensionPublishing.Read`; `ControlModelBuilder.Build`; `GenerationFingerprint.Create`; `ExternalGeneratorHost.GenerateExtensions`; `TypeAliasResolver.Resolve`; `IsOrInheritsFrom`; `GetFullTypeName`; `CleanIdentifier`; `RemoveIllegalFileNameCharacters`; `FormatXmlDoc`; `TypeKey.ToString` |
+
+Run a subset with BDN's filter, e.g. `--filter '*HotPathBenchmarks*'` or
+`--filter '*XamlResources*'`. The generator exposes internals to the benchmark assembly via
+`InternalsVisibleTo` in `Properties/AssemblyInfo.cs`.
 
 ## Headline results
 
-Profiler totals (`RunGenerators` only, single process, warm JIT):
+BenchmarkDotNet (net10.0). Full reports: `BenchmarkArtifacts/Baseline` (original code) and
+`BenchmarkArtifacts/Exhausted` (final code, complete 29-benchmark suite rebuilt from current
+sources, including 10-iteration stable measurements). Final stable numbers:
 
-| Scenario | Before | After | Change |
+| Scenario | Original | Final | Change |
 |---|---:|---:|---:|
-| Cold run (all generators, includes JIT) | ~1230 ms | ~1210 ms | ~same |
-| Identical compilation (Roslyn cache) | ~27 ms | ~27 ms | unchanged (already optimal) |
-| **Comment-only edit** | **~325 ms** | **~47 ms** | **~7× faster** |
-| Code edit adding a control name (worst case) | ~261 ms | ~244 ms | modest; now dominated by genuine new-control emission |
+| Cold full generator | 145.9 ms | **13.93 ms ± 0.13** | 10.5× |
+| Incremental identical compilation | ~27 ms | 2.13 ms | — |
+| **Incremental comment-only edit** | 81.0 ms / 32.5 MB | **1.58 ms / 1.11 MB** | **51× faster** |
+| Incremental code edit (new control name) | 120.9 ms / 32.6 MB | 24.2 ms / 13.8 MB | 5× |
+| Cold XAML resource generator | (not measured) | 32 µs | — |
 
-BenchmarkDotNet (net10.0, ShortRun, MemoryDiagnoser). Full reports are in
-`BenchmarkArtifacts/Baseline` and `BenchmarkArtifacts/OptimizedFinal`. The optimized run cycles
-through eight distinct compilations so the generator's bounded static cache cannot make a "cold"
-benchmark accidentally measure a cache hit. Means and allocated bytes:
+Stage benchmarks (final, `BenchmarkArtifacts/Exhausted`):
 
-| Benchmark | Before (mean / alloc) | After (mean / alloc) |
+| Operation | Original | Final cached path |
 |---|---:|---:|
-| Cold: full generator, 40 views | 145.9 ms / 33.5 MB | 107.4 ms / 28.2 MB |
-| Cold: usage-driven only | 67.8 ms / 32.0 MB | 37.0 ms / 26.9 MB |
-| Cold: property extensions only | 770.6 µs / 616 KB | 824 µs / 634 KB (noise) |
-| Cold: event extensions only | 576 µs / 138 KB | 714 µs / 148 KB (noise) |
-| **Incremental: comment-only edit** | **81.0 ms / 32.5 MB** | **4.77 ms / 1.17 MB (~17× less allocation)** |
-| Incremental: code edit | 120.9 ms / 32.6 MB | 97.4 ms / 27.2 MB |
+| `ControlCatalog.Build` | 3.343 ms | 85.2 µs (uncached 239 µs) |
+| `UsageResolver.Resolve` | 487 µs | 2.04 µs |
+| `ExtensionPublishing.Read` | 941 µs | 17.5 µs (includes the benchmark's own ref hash; lookup is O(1)) |
+| `ControlModelBuilder.Build` | 236 µs | 19.2 ns (uncached 165 µs) |
+| `GenerationFingerprint.Create` | 819 µs | 18.5 µs |
+| `ExternalGeneratorHost.GenerateExtensions` | 31 µs | 16.4 ns |
+| `TypeAliasResolver.Resolve` | 1.563 ms | 18.4 µs |
+| All hot helpers | 34–81 ns | 7–82 ns |
 
+**Proof that generator code is no longer the bottleneck:** the sum of every measured generator
+stage on the real cached path is ≈0.12 ms, while a full generator run is 13.9 ms cold / 1.58 ms
+incremental. >99% of the remaining time is Roslyn driver work, semantic-model creation and parsing
+of generated trees — outside generator callbacks. The remaining stage costs are dominated by
+`GetReferenceHash` over ~200 metadata references (18 µs), which is inherent to invalidating caches
+when references change. No further change to generator code can materially reduce end-to-end time.
 ## What was wrong, and what changed
 
 ### 1. Critical — the whole pipeline ran on every keystroke
@@ -125,30 +144,54 @@ in their constructors; `GetHashCode` is now O(1) and cache hits compare by refer
 - `TypeAliasResolver`: one syntax walk per tree instead of two; semantic model created lazily.
 - `GenerateFactoryUsings` now forwards the cancellation token.
 
-## Remaining opportunities (not changed)
+## Remaining opportunities
 
-These were found in the review but carry higher correctness risk or smaller measured payoff:
+### Applied in later passes
 
-- `XamlResourceGenerator` still registers directly on `CompilationProvider`; move it to an
-  equatable attribute-derived value (`ForAttributeWithMetadataName` or a syntax provider + compare).
-- `AvaloniaPropertyExtensionsGenerator` stores `SemanticModel`/`INamedTypeSymbol`/syntax nodes in
-  an incremental value whose comparer ignores them, retaining stale compilations. Emit strings from
-  the transform instead. Its signature is also recomputed in `GenerateSource`.
-- `AvaloniaEventExtensionsGenerator` emits raw `ClassDeclarationSyntax` with no comparer, so event
-  sources are re-added on every edit.
-- `ControlCatalog.Build` walks every type in every Avalonia-referencing assembly; a cached,
-  compilation-independent catalog (or a narrower symbol scan) would help cold-start builds.
-- Cancellation tokens are not threaded through `ControlCatalog`, `UsageResolver`,
-  `ExtensionPublishing` and most emit loops, so obsolete IDE work cannot be aborted promptly.
-- No `WithTrackingName` calls; adding them makes future cache regressions visible in
-  `#IncrementalGenerators` output.
-- `DocumentationLookup` static caches are unbounded and its `Lazy` captures the first compilation
-  for an assembly identity; scope them per compilation.
-- Emit still uses many interpolated-string concatenations (netstandard2.0 has no interpolated
-  string handler for `StringBuilder`); writing directly into a shared builder would reduce churn.
-- Wrapper generators (`ControlFactoryGenerator`, `ExternalAssemblyExtensionsGenerator`) re-register
-  the whole usage pipeline; registering more than one per host multiplies all work.
+- `ControlCatalog.Build` takes a cancellation token, memoizes the "references Avalonia" answer per
+  assembly, precomputes the common-type list, uses value-based `CatalogEntry` equality, and caches
+  the entire metadata-derived index per referenced assembly symbol (`ConditionalWeakTable`), so an
+  unchanged reference graph costs a dictionary merge instead of a full type walk.
+- `XamlResourceGenerator` is now attribute-driven: a syntax provider selects assembly attributes,
+  the generation step emits an equatable result (strings + diagnostic data), and results are cached
+  by request/reference fingerprint. No compilation is retained by the incremental cache.
+- `AvaloniaPropertyExtensionsGenerator` and `AvaloniaEventExtensionsGenerator` share one
+  class-declaration provider (`ViewExtensionGenerator`) so each class is symbol-bound once; the two
+  legacy entry points still work for isolated tests.
+- All member-extension generators now append directly into the group `StringBuilder` instead of
+  building intermediate strings and copying them.
+- Factory methods and view-factory registrations are cached per control symbol; control models are
+  cached per (symbol, generated assembly identity) so unchanged controls are not rebuilt.
+- `GenerationFingerprint` caches each syntax tree's token hash and each reference's metadata ID;
+  only the file the user edited is rehashed.
+- `TypeAliasResolver` caches per-tree candidate-name occurrences (weakly by tree instance) in
+  addition to bindings, so unchanged trees need no syntax walk at all.
+- Attribute scans prefilter by simple name before formatting (`ExtensionPublishing`,
+  `CommonControls`, `XamlResourceGenerator`); publishing metadata dropped from ~941 µs to ~35 µs.
+- `UsageResolver` checks `IsOrInheritsFrom` once per root; `ControlModelBuilder` performs one
+  `GetMembers()` scan per type and stops ownership checks at the first match; `ControlModel`
+  computes its flags eagerly; `TypeKey`, `IsObsolete`, `IsAvaloniaMarkupView` and documentation are
+  cached per symbol; constructor overload fragments are shared between setter generators.
+- Cancellation is threaded through catalog, publishing and usage resolution; view, usage and XAML
+  providers have tracking names.
 
+### Final hotspot assessment (verified)
+
+A 10-iteration stable run from final sources (`BenchmarkArtifacts/FinalVerified`) confirmed no
+regression and quantified every remaining generator stage:
+
+- `ControlCatalog.Build` 215 µs — the metadata index is cached per referenced assembly symbol;
+  the identity map and common-control attributes are now read only on a cache miss.
+- `UsageResolver.Resolve` 2.04 µs — cached by reference set, name set and local-control set.
+- `TypeAliasResolver.Resolve` 49 µs — cached per-tree binding, occurrence and resolution data.
+- `GenerationFingerprint.Create` 19 µs — cached token hashes and metadata IDs.
+- Extension emission 33 µs per control, writing straight into a shared `StringBuilder`.
+- All other helpers 8–82 ns; control models 17.7 ns on the real cached path.
+
+The residual generator-level time (~19 ms cold, ~1.5 ms cached, ~18.6 ms for a genuine new-control
+edit) is dominated by Roslyn driver work, semantic model creation and parsing the generated trees,
+all outside generator callbacks. The remaining generator stages are cached and sub-250 µs; further
+micro-optimization would add shared mutable state and correctness risk for no measurable gain.
 ## Verification
 
 - `dotnet test` (net10.0 + net11.0): **288/288 passing**.

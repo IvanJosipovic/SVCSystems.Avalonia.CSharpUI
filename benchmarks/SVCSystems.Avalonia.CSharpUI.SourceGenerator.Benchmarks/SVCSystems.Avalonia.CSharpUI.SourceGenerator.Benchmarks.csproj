@@ -19,6 +19,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\SVCSystems.Avalonia.CSharpUI.SourceGenerator\SVCSystems.Avalonia.CSharpUI.SourceGenerator.csproj" />
     <ProjectReference Include="..\..\src\SVCSystems.Avalonia.CSharpUI\SVCSystems.Avalonia.CSharpUI.csproj" />
+    <ProjectReference Include="..\..\tests\SVCSystems.Avalonia.CSharpUI.Tests.XamlFixtures\SVCSystems.Avalonia.CSharpUI.Tests.XamlFixtures.csproj" />
   </ItemGroup>
 
 </Project>

@@ -18,6 +18,13 @@ internal static class SymbolUtilities
     private static readonly ConcurrentDictionary<string, string?> CleanIdentifiers = new(StringComparer.Ordinal);
     private static readonly HashSet<char> InvalidFileNameChars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
+    private sealed class BoolBox(bool value)
+    {
+        internal bool Value { get; } = value;
+    }
+
+    private static readonly ConditionalWeakTable<ISymbol, BoolBox> ObsoleteCache = new();
+
     internal static string FormatXmlDoc(ISymbol? symbol, Compilation? compilation = null) =>
         DocumentationLookup.GetDocumentation(symbol, compilation);
 
@@ -35,29 +42,38 @@ internal static class SymbolUtilities
 
     internal static IEnumerable<ISymbol> GetAllMembers(this INamedTypeSymbol type)
     {
-        var seen = new HashSet<string>();
+        var seen = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        var visitedTypes = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
         var stack = new Stack<INamedTypeSymbol>();
         stack.Push(type);
 
         while (stack.Count > 0)
         {
             var current = stack.Pop();
+            if (!visitedTypes.Add(current))
+            {
+                continue;
+            }
+
             foreach (var member in current.GetMembers())
             {
-                if (seen.Add(member.ToDisplayString()))
+                if (seen.Add(member))
                 {
                     yield return member;
                 }
             }
 
-            if (current.BaseType != null)
+            if (current.BaseType is { } baseType && !visitedTypes.Contains(baseType))
             {
-                stack.Push(current.BaseType);
+                stack.Push(baseType);
             }
 
             foreach (var iface in current.Interfaces)
             {
-                stack.Push(iface);
+                if (!visitedTypes.Contains(iface))
+                {
+                    stack.Push(iface);
+                }
             }
         }
     }
@@ -194,7 +210,8 @@ internal static class SymbolUtilities
     }
 
     internal static bool IsObsolete(this ISymbol symbol) =>
-        symbol.GetAttributes().Any(static x => x.AttributeClass?.Name == nameof(ObsoleteAttribute));
+        ObsoleteCache.GetValue(symbol, static value =>
+            new BoolBox(value.GetAttributes().Any(static x => x.AttributeClass?.Name == nameof(ObsoleteAttribute)))).Value;
 
     internal static IPropertySymbol? GetBackingPropertySymbol(this IFieldSymbol field) =>
         field.ContainingType?.GetMembers(field.GetMemberName()).OfType<IPropertySymbol>().FirstOrDefault();

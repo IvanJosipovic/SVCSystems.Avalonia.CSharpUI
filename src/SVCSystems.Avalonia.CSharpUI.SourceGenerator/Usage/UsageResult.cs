@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Microsoft.CodeAnalysis;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
@@ -10,6 +11,15 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
 /// </summary>
 internal readonly struct TypeKey : IEquatable<TypeKey>
 {
+    private sealed class KeyBox
+    {
+        internal KeyBox(TypeKey key) => Key = key;
+
+        internal TypeKey Key { get; }
+    }
+
+    private static readonly ConditionalWeakTable<INamedTypeSymbol, KeyBox> Cache = new();
+
     private readonly string _assemblyName;
     private readonly string _typeName;
 
@@ -23,16 +33,19 @@ internal readonly struct TypeKey : IEquatable<TypeKey>
 
     internal string TypeName => _typeName;
 
-    internal static TypeKey Create(INamedTypeSymbol type)
-    {
-        var typeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-        if (typeName.StartsWith("global::", StringComparison.Ordinal))
+    internal static TypeKey Create(INamedTypeSymbol type) =>
+        Cache.GetValue(type, static symbol =>
         {
-            typeName = typeName.Substring("global::".Length);
-        }
+            var typeName = symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            if (typeName.StartsWith("global::", StringComparison.Ordinal))
+            {
+                typeName = typeName.Substring("global::".Length);
+            }
 
-        return new TypeKey(type.ContainingAssembly?.Identity.Name ?? string.Empty, typeName);
-    }
+            return new KeyBox(new TypeKey(
+                symbol.ContainingAssembly?.Identity.Name ?? string.Empty,
+                typeName));
+        }).Key;
 
     public bool Equals(TypeKey other) =>
         StringComparer.Ordinal.Equals(_assemblyName, other._assemblyName) &&
@@ -58,6 +71,8 @@ internal readonly struct TypeKey : IEquatable<TypeKey>
 /// </summary>
 internal sealed class UsageResult : IEquatable<UsageResult>
 {
+    private readonly int _hash;
+
     internal static readonly UsageResult Empty = new(
         ImmutableArray<TypeKey>.Empty,
         ImmutableArray<string>.Empty);
@@ -66,6 +81,22 @@ internal sealed class UsageResult : IEquatable<UsageResult>
     {
         Keys = keys;
         AmbiguousNames = ambiguousNames;
+
+        unchecked
+        {
+            var hash = 17;
+            foreach (var key in keys)
+            {
+                hash = (hash * 31) + key.GetHashCode();
+            }
+
+            foreach (var name in ambiguousNames)
+            {
+                hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(name);
+            }
+
+            _hash = hash;
+        }
     }
 
     internal ImmutableArray<TypeKey> Keys { get; }
@@ -79,22 +110,5 @@ internal sealed class UsageResult : IEquatable<UsageResult>
 
     public override bool Equals(object? obj) => obj is UsageResult other && Equals(other);
 
-    public override int GetHashCode()
-    {
-        unchecked
-        {
-            var hash = 17;
-            foreach (var key in Keys)
-            {
-                hash = (hash * 31) + key.GetHashCode();
-            }
-
-            foreach (var name in AmbiguousNames)
-            {
-                hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(name);
-            }
-
-            return hash;
-        }
-    }
+    public override int GetHashCode() => _hash;
 }

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -34,6 +35,26 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
     private const ulong Offset2 = 14695981039346656011UL;
     private const ulong Prime2 = 1099511628217UL;
 
+    private sealed class StringBox
+    {
+        internal StringBox(string value) => Value = value;
+
+        internal string Value { get; }
+    }
+
+    private sealed class TreeHash
+    {
+        internal ulong Hash1;
+        internal ulong Hash2;
+    }
+
+    private static readonly ConditionalWeakTable<PortableExecutableReference, StringBox> MetadataIdCache = new();
+
+    // Roslyn reuses the same SyntaxTree instance for every file that the user did not edit.
+    // Caching each tree's token hash means an edit only rehashes the edited file instead of
+    // re-walking the whole compilation on every keystroke.
+    private static readonly ConditionalWeakTable<SyntaxTree, TreeHash> TreeHashes = new();
+
     internal static GenerationFingerprint Create(
         ImmutableArray<string> names,
         Compilation compilation,
@@ -55,22 +76,9 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
                 continue;
             }
 
-            Add(ref hash1, ref hash2, tree.FilePath ?? string.Empty);
-            var root = tree.GetRoot(cancellationToken);
-            foreach (var token in root.DescendantTokens(descendIntoTrivia: false))
-            {
-                Add(ref hash1, ref hash2, token.Text);
-
-                // XML documentation is emitted into generated code, so it is part of the fingerprint.
-                foreach (var trivia in token.LeadingTrivia)
-                {
-                    if (trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia) ||
-                        trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia))
-                    {
-                        Add(ref hash1, ref hash2, trivia.ToFullString());
-                    }
-                }
-            }
+            var treeHash = GetTreeHash(tree, cancellationToken);
+            hash1 = (hash1 ^ treeHash.Hash1) * Prime1;
+            hash2 = (hash2 ^ treeHash.Hash2) * Prime2;
         }
 
         return new GenerationFingerprint(hash1, hash2);
@@ -84,21 +92,31 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
         foreach (var reference in compilation.References)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Add(ref hash, reference.Display ?? string.Empty);
             if (reference is PortableExecutableReference portable)
             {
                 try
                 {
-                    var metadata = portable.GetMetadata();
-                    if (metadata is not null)
+                    // Metadata.Id is derived from the assembly content; hashing the display path
+                    // as well would double the work without changing the identified symbol set.
+                    var id = MetadataIdCache.GetValue(portable, static reference =>
+                        new StringBox(reference.GetMetadata()?.Id.ToString() ?? string.Empty)).Value;
+                    if (id.Length > 0)
                     {
-                        Add(ref hash, metadata.Id.ToString());
+                        Add(ref hash, id);
+                    }
+                    else
+                    {
+                        Add(ref hash, reference.Display ?? string.Empty);
                     }
                 }
                 catch (Exception exception) when (exception is BadImageFormatException or IOException)
                 {
-                    // A reference that cannot be opened cannot contribute symbols either.
+                    Add(ref hash, reference.Display ?? string.Empty);
                 }
+            }
+            else
+            {
+                Add(ref hash, reference.Display ?? string.Empty);
             }
         }
 
@@ -107,17 +125,45 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
 
     /// <summary>
     /// Hashes the token stream of one tree; comments and whitespace are ignored because they
-    /// cannot change semantic binding. Used to reuse type bindings across compilations.
+    /// cannot change generated output or semantic binding. The result is cached for the lifetime
+    /// of the tree, which Roslyn keeps stable across compilations for unchanged files.
     /// </summary>
-    internal static ulong GetTreeKey(SyntaxTree tree, ulong referenceHash)
+    private static TreeHash GetTreeHash(SyntaxTree tree, CancellationToken cancellationToken)
     {
-        var hash = referenceHash;
-        Add(ref hash, tree.FilePath ?? string.Empty);
-        foreach (var token in tree.GetRoot().DescendantTokens(descendIntoTrivia: false))
+        if (TreeHashes.TryGetValue(tree, out var cached))
         {
-            Add(ref hash, token.Text);
+            return cached;
         }
 
+        ulong hash1 = Offset1;
+        ulong hash2 = Offset2;
+        Add(ref hash1, ref hash2, tree.FilePath ?? string.Empty);
+        foreach (var token in tree.GetRoot(cancellationToken).DescendantTokens(descendIntoTrivia: false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Add(ref hash1, ref hash2, token.Text);
+
+            // XML documentation is emitted into generated code, so it is part of the fingerprint.
+            foreach (var trivia in token.LeadingTrivia)
+            {
+                if (trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia) ||
+                    trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia))
+                {
+                    Add(ref hash1, ref hash2, trivia.ToFullString());
+                }
+            }
+        }
+
+        return TreeHashes.GetValue(tree, _ => new TreeHash { Hash1 = hash1, Hash2 = hash2 });
+    }
+
+    /// <summary>Key for a tree's cached type bindings in a given reference set.</summary>
+    internal static ulong GetTreeKey(SyntaxTree tree, ulong referenceHash)
+    {
+        var treeHash = GetTreeHash(tree, default);
+        var hash = referenceHash;
+        hash = (hash ^ treeHash.Hash1) * Prime1;
+        hash = (hash ^ treeHash.Hash2) * Prime2;
         return hash;
     }
 

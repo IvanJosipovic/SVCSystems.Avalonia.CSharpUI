@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using System.Text;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.Analysis;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExtensionInfos;
@@ -108,18 +109,62 @@ internal sealed class ExternalGeneratorHost
         Compilation? compilation = null,
         bool publish = false,
         bool suppressOverlappingSetters = false)
-        => GenerateExtensions(ControlModelBuilder.Build(controlType), compilation, publish, suppressOverlappingSetters);
+        => GenerateExtensions(
+            ControlModelBuilder.Build(controlType, compilation?.Assembly),
+            compilation,
+            publish,
+            suppressOverlappingSetters);
+
+    private sealed class CodeCacheEntry
+    {
+        internal bool HasValue;
+        internal string? Code;
+        internal bool Publish;
+        internal bool Suppress;
+        internal ulong ReferenceHash;
+    }
+
+    private static readonly ConditionalWeakTable<ControlModel, CodeCacheEntry> CodeCache = new();
 
     internal string? GenerateExtensions(
         ControlModel controlModel,
         Compilation? compilation = null,
         bool publish = false,
-        bool suppressOverlappingSetters = false)
+        bool suppressOverlappingSetters = false,
+        ulong referenceHash = 0)
     {
         if (controlModel.IgnoreGeneratedExtensions)
         {
             return null;
         }
+
+        var cacheEntry = CodeCache.GetValue(controlModel, _ => new CodeCacheEntry());
+        lock (cacheEntry)
+        {
+            if (cacheEntry.HasValue &&
+                cacheEntry.Publish == publish &&
+                cacheEntry.Suppress == suppressOverlappingSetters &&
+                cacheEntry.ReferenceHash == referenceHash)
+            {
+                return cacheEntry.Code;
+            }
+
+            var cachedCode = GenerateExtensionsCore(controlModel, compilation, publish, suppressOverlappingSetters);
+            cacheEntry.HasValue = true;
+            cacheEntry.Code = cachedCode;
+            cacheEntry.Publish = publish;
+            cacheEntry.Suppress = suppressOverlappingSetters;
+            cacheEntry.ReferenceHash = referenceHash;
+            return cachedCode;
+        }
+    }
+
+    private string? GenerateExtensionsCore(
+        ControlModel controlModel,
+        Compilation? compilation,
+        bool publish,
+        bool suppressOverlappingSetters)
+    {
 
         List<(string GroupName, string Extensions)>? generatedGroups = null;
 

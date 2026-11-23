@@ -1,12 +1,14 @@
+using System.Text;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExtensionInfos;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
 
 internal abstract class ExtensionGeneratorBase<TMemberExtensionInfo> : ExtensionGeneratorBase
 {
-    protected abstract string? GetExtension(TMemberExtensionInfo info);
+    internal override void AppendExtension(StringBuilder builder, IMemberExtensionInfo info) =>
+        AppendExtension(builder, (TMemberExtensionInfo)info);
 
-    public override string? GetExtension(IMemberExtensionInfo info) => GetExtension((TMemberExtensionInfo)info);
+    protected abstract void AppendExtension(StringBuilder builder, TMemberExtensionInfo info);
 }
 
 internal abstract class ExtensionGeneratorBase
@@ -15,10 +17,16 @@ internal abstract class ExtensionGeneratorBase
 
     protected static string CallerInfoArguments => ", _callerFile, _callerLine";
 
-    protected static string PrefixDocumentation(string xmlDoc, string extensionCode) =>
-        string.IsNullOrEmpty(xmlDoc) ? extensionCode : xmlDoc + extensionCode;
+    protected static void AppendDocumentation(StringBuilder builder, string xmlDoc)
+    {
+        if (!string.IsNullOrEmpty(xmlDoc))
+        {
+            builder.Append(xmlDoc);
+        }
+    }
 
-    public abstract string? GetExtension(IMemberExtensionInfo info);
+    /// <summary>Writes the extension directly into the group's builder, avoiding an intermediate string.</summary>
+    internal abstract void AppendExtension(StringBuilder builder, IMemberExtensionInfo info);
 
     /// <summary>
     /// Whether this generator emits an overload that AvaloniaPropertyExtensionsGenerator or

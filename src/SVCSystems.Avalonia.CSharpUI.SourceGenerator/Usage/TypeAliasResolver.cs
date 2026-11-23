@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -14,6 +15,123 @@ internal readonly struct AliasResolutionResult(
     internal ImmutableArray<KeyValuePair<string, string>> Aliases { get; } = aliases;
 
     internal ImmutableArray<(string Name, string Reason)> Skipped { get; } = skipped;
+}
+
+internal readonly struct NameOccurrence
+{
+    internal NameOccurrence(string text, string context, string qualifier, SimpleNameSyntax node)
+    {
+        Text = text;
+        Context = context;
+        Qualifier = qualifier;
+        Node = node;
+    }
+
+    internal SimpleNameSyntax Node { get; }
+
+    internal string Text { get; }
+
+    internal string Context { get; }
+
+    internal string Qualifier { get; }
+
+    internal string Key => Text + "\0" + Context + "\0" + Qualifier;
+}
+
+internal sealed class TreeOccurrences
+{
+    internal ImmutableArray<NameOccurrence> Names = ImmutableArray<NameOccurrence>.Empty;
+    internal ImmutableArray<string> UserAliases = ImmutableArray<string>.Empty;
+}
+
+/// <summary>
+/// The syntactic part of alias resolution depends only on a tree's token hash and the factory
+/// name set. Roslyn reuses unchanged trees, so this cache removes the full syntax walk on every
+/// generation; only trees the user actually edited are re-walked.
+/// </summary>
+internal static class TypeAliasOccurrenceCache
+{
+    // Syntax nodes belong to one tree instance. Roslyn keeps unchanged trees alive across
+    // compilations, but a comment-only edit creates a new tree with the same token hash; keying
+    // by the tree instance (weakly) is therefore required even though the token hash matches.
+    private sealed class Entry
+    {
+        internal int FactoryHash;
+        internal TreeOccurrences Occurrences = null!;
+    }
+
+    private static readonly ConditionalWeakTable<SyntaxTree, Entry> Entries = new();
+
+    internal static bool TryGet(
+        SyntaxTree tree,
+        int factoryHash,
+        out TreeOccurrences occurrences)
+    {
+        if (Entries.TryGetValue(tree, out var entry) && entry.FactoryHash == factoryHash)
+        {
+            occurrences = entry.Occurrences;
+            return true;
+        }
+
+        occurrences = null!;
+        return false;
+    }
+
+    internal static void Add(SyntaxTree tree, int factoryHash, TreeOccurrences occurrences) =>
+        Entries.GetValue(tree, _ => new Entry { FactoryHash = factoryHash, Occurrences = occurrences });
+}
+
+internal sealed class TreeResolution
+{
+    internal ImmutableArray<(string Name, string DisplayName)> Bindings = ImmutableArray<(string, string)>.Empty;
+    internal ImmutableArray<string> SkippedNames = ImmutableArray<string>.Empty;
+    internal ImmutableArray<string> UserAliases = ImmutableArray<string>.Empty;
+}
+
+/// <summary>
+/// The final syntactic+semantic alias facts for one tree. Keyed weakly by tree instance plus the
+/// reference set and factory names, so unchanged trees contribute their aliases in O(1).
+/// </summary>
+internal static class TypeAliasResolutionCache
+{
+    private sealed class Entry
+    {
+        internal int FactoryHash;
+        internal ulong ReferenceHash;
+        internal TreeResolution Resolution = null!;
+    }
+
+    private static readonly ConditionalWeakTable<SyntaxTree, Entry> Entries = new();
+
+    internal static bool TryGet(
+        SyntaxTree tree,
+        int factoryHash,
+        ulong referenceHash,
+        out TreeResolution resolution)
+    {
+        if (Entries.TryGetValue(tree, out var entry) &&
+            entry.FactoryHash == factoryHash &&
+            entry.ReferenceHash == referenceHash)
+        {
+            resolution = entry.Resolution;
+            return true;
+        }
+
+        resolution = null!;
+        return false;
+    }
+
+    internal static void Add(
+        SyntaxTree tree,
+        int factoryHash,
+        ulong referenceHash,
+        TreeResolution resolution) =>
+        Entries.GetValue(tree, _ => new Entry
+        {
+            FactoryHash = factoryHash,
+            ReferenceHash = referenceHash,
+            Resolution = resolution
+        });
 }
 
 internal readonly struct TypeAliasBinding : IEquatable<TypeAliasBinding>
@@ -68,6 +186,8 @@ internal static class TypeAliasBindingCache
 /// </summary>
 internal static class TypeAliasResolver
 {
+    private static readonly ConcurrentDictionary<(ulong, ulong, ulong), AliasResolutionResult> ResultCache = new();
+
     internal static AliasResolutionResult Resolve(
         Compilation compilation,
         HashSet<string> factoryNames,
@@ -88,14 +208,170 @@ internal static class TypeAliasResolver
         // misses the per-name cache and gets bound; existing bindings stay reusable.
         var referenceHash = GenerationCache.GetReferenceHash(compilation);
 
+        // A stable hash of the factory set; occurrences are cached per (tree, factory set).
+        ulong factoryHash = 14695981039346656037UL;
+        foreach (var factoryName in factoryNames)
+        {
+            ulong nameHash = 14695981039346656037UL;
+            foreach (var ch in factoryName)
+            {
+                nameHash = (nameHash ^ ch) * 1099511628211UL;
+            }
+
+            factoryHash ^= nameHash;
+        }
+
+        var factoryHashCode = unchecked((int)(factoryHash ^ (factoryHash >> 32)));
+
+        // A compilation changes on every keystroke, but the set of trees usually does not.
+        // Hashing the cached per-tree token hashes gives a cheap identity for the whole tree set.
+        const ulong prime = 1099511628211UL;
+        ulong treeSetHash = 14695981039346656037UL;
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            treeSetHash = (treeSetHash ^ GenerationCache.GetTreeKey(tree, referenceHash)) * prime;
+        }
+
+        var resultKey = (referenceHash, factoryHash, treeSetHash);
+        if (ResultCache.TryGetValue(resultKey, out var cachedResult))
+        {
+            return cachedResult;
+        }
+
         foreach (var syntaxTree in compilation.SyntaxTrees)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var root = syntaxTree.GetRoot(cancellationToken);
-            SemanticModel? semanticModel = null;
             var treeKey = GenerationCache.GetTreeKey(syntaxTree, referenceHash);
             TypeAliasBindingCache.TryGet(treeKey, out var cachedBindings);
             Dictionary<(string, string), TypeAliasBinding>? newBindings = null;
+
+            if (TypeAliasResolutionCache.TryGet(syntaxTree, factoryHashCode, referenceHash, out var cachedResolution))
+            {
+                foreach (var alias in cachedResolution.UserAliases)
+                {
+                    userAliases.Add(alias);
+                }
+
+                foreach (var skippedName in cachedResolution.SkippedNames)
+                {
+                    skippedByName[skippedName] = "cannot be used in a global alias";
+                }
+
+                foreach (var binding in cachedResolution.Bindings)
+                {
+                    if (!typesByName.TryGetValue(binding.Name, out var existing))
+                    {
+                        existing = new HashSet<string>(StringComparer.Ordinal);
+                        typesByName.Add(binding.Name, existing);
+                    }
+
+                    existing.Add(binding.DisplayName);
+                }
+
+                continue;
+            }
+
+            if (!TypeAliasOccurrenceCache.TryGet(syntaxTree, factoryHashCode, out var occurrences))
+            {
+                occurrences = CollectOccurrences(syntaxTree, factoryNames, cancellationToken);
+                TypeAliasOccurrenceCache.Add(syntaxTree, factoryHashCode, occurrences);
+            }
+
+            foreach (var alias in occurrences.UserAliases)
+            {
+                userAliases.Add(alias);
+            }
+
+            var resolvedNames = ImmutableArray.CreateBuilder<(string, string)>();
+            var skippedNames = ImmutableArray.CreateBuilder<string>();
+            SemanticModel? semanticModel = null;
+            foreach (var occurrence in occurrences.Names)
+            {
+                var text = occurrence.Text;
+                var key = (text, occurrence.Context + "|" + occurrence.Qualifier);
+                TypeAliasBinding binding;
+                if (cachedBindings is not null && cachedBindings.TryGetValue(key, out binding))
+                {
+                    // Reuse the binding resolved for this unchanged tree in an earlier compilation.
+                }
+                else if (newBindings is not null && newBindings.TryGetValue(key, out binding))
+                {
+                    // The same (name, context) repeated inside this tree.
+                }
+                else
+                {
+                    semanticModel ??= compilation.GetSemanticModel(syntaxTree);
+                    var type = semanticModel.GetSymbolInfo(occurrence.Node, cancellationToken).Symbol as INamedTypeSymbol;
+                    binding = type is not null
+                        ? new TypeAliasBinding(
+                            type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                            CanUseInGlobalAlias(type, compilation))
+                        : default;
+
+                    if (binding.DisplayName is not null)
+                    {
+                        newBindings ??= [];
+                        newBindings[key] = binding;
+                    }
+                }
+
+                if (binding.DisplayName is null)
+                {
+                    continue;
+                }
+
+                if (!binding.CanUseInGlobalAlias)
+                {
+                    skippedByName[text] = "cannot be used in a global alias";
+                    skippedNames.Add(text);
+                    continue;
+                }
+
+                if (!typesByName.TryGetValue(text, out var types))
+                {
+                    types = new HashSet<string>(StringComparer.Ordinal);
+                    typesByName.Add(text, types);
+                }
+
+                if (types.Add(binding.DisplayName))
+                {
+                    resolvedNames.Add((text, binding.DisplayName));
+                }
+            }
+
+            if (newBindings is not null)
+            {
+                if (cachedBindings is not null)
+                {
+                    foreach (var pair in cachedBindings)
+                    {
+                        if (!newBindings.ContainsKey(pair.Key))
+                        {
+                            newBindings.Add(pair.Key, pair.Value);
+                        }
+                    }
+                }
+
+                TypeAliasBindingCache.Add(treeKey, newBindings);
+            }
+
+            TypeAliasResolutionCache.Add(syntaxTree, factoryHashCode, referenceHash, new TreeResolution
+            {
+                Bindings = resolvedNames.ToImmutable(),
+                SkippedNames = skippedNames.ToImmutable(),
+                UserAliases = occurrences.UserAliases
+            });
+        }
+
+        static TreeOccurrences CollectOccurrences(
+            SyntaxTree syntaxTree,
+            HashSet<string> factoryNames,
+            CancellationToken cancellationToken)
+        {
+            var root = syntaxTree.GetRoot(cancellationToken);
+            var result = new TreeOccurrences();
+            var names = ImmutableArray.CreateBuilder<NameOccurrence>();
+            var aliases = ImmutableArray.CreateBuilder<string>();
             var contextByScope = new Dictionary<SyntaxNode, string>();
             var fileContext = new System.Text.StringBuilder(128);
 
@@ -106,7 +382,7 @@ internal static class TypeAliasResolver
                     fileContext.Append(usingDirective.ToString()).Append(';');
                     if (usingDirective.Alias is { } alias)
                     {
-                        userAliases.Add(alias.Name.Identifier.ValueText);
+                        aliases.Add(alias.Name.Identifier.ValueText);
                     }
 
                     continue;
@@ -132,13 +408,9 @@ internal static class TypeAliasResolver
                 {
                     var contextBuilder = new System.Text.StringBuilder(fileContext.Length + 80)
                         .Append(fileContext)
-                        // Scope kind + offset distinguishes a using-alias name from usages in a
-                        // method, while identical files still share the same context string.
                         .Append(scope.Kind()).Append('@').Append(scope.SpanStart).Append(';');
                     foreach (var ancestor in scope.AncestorsAndSelf())
                     {
-                        // Only a type whose name matches a factory name can shadow it. Ignoring
-                        // ordinary containing view classes lets identical files share bindings.
                         if (ancestor is BaseTypeDeclarationSyntax declaration &&
                             factoryNames.Contains(declaration.Identifier.ValueText))
                         {
@@ -150,81 +422,20 @@ internal static class TypeAliasResolver
                     contextByScope.Add(scope, context);
                 }
 
-                // A.Shared and B.Shared are different bindings even in the same method, so the
-                // qualifier preceding the simple name is part of the cache key.
                 var qualifier = name.Parent switch
                 {
                     QualifiedNameSyntax qualified when qualified.Right == name => qualified.Left.ToString(),
                     MemberAccessExpressionSyntax memberAccess when memberAccess.Name == name => memberAccess.Expression.ToString(),
                     _ => string.Empty
                 };
-                var key = (text, context + "|" + qualifier);
-                TypeAliasBinding binding;
-                if (cachedBindings is not null && cachedBindings.TryGetValue(key, out binding))
-                {
-                    // Reuse the binding from a previous compilation for this unchanged tree.
-                }
-                else if (newBindings is not null && newBindings.TryGetValue(key, out binding))
-                {
-                    // The same (name, context) repeated inside this tree.
-                }
-                else
-                {
-                    semanticModel ??= compilation.GetSemanticModel(syntaxTree);
-                    var type = semanticModel.GetSymbolInfo(name, cancellationToken).Symbol as INamedTypeSymbol;
-                    binding = type is not null
-                        ? new TypeAliasBinding(
-                            type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-                            CanUseInGlobalAlias(type, compilation))
-                        : default;
 
-                    if (binding.DisplayName is not null)
-                    {
-                        // Failed binds are not cached: the same text may resolve differently in
-                        // another scope (a local can shadow the type).
-                        newBindings ??= [];
-                        newBindings[key] = binding;
-                    }
-                }
-
-                if (binding.DisplayName is null)
-                {
-                    continue;
-                }
-
-                if (!binding.CanUseInGlobalAlias)
-                {
-                    skippedByName[text] = "cannot be used in a global alias";
-                    continue;
-                }
-
-                if (!typesByName.TryGetValue(text, out var types))
-                {
-                    types = new HashSet<string>(StringComparer.Ordinal);
-                    typesByName.Add(text, types);
-                }
-
-                types.Add(binding.DisplayName);
+                names.Add(new NameOccurrence(text, context, qualifier, name));
             }
 
-            if (newBindings is not null)
-            {
-                // Merge with any cached bindings from other compilations with the same tree key.
-                if (cachedBindings is not null)
-                {
-                    foreach (var pair in cachedBindings)
-                    {
-                        if (!newBindings.ContainsKey(pair.Key))
-                        {
-                            newBindings.Add(pair.Key, pair.Value);
-                        }
-                    }
-                }
-
-                TypeAliasBindingCache.Add(treeKey, newBindings);
-            }
+            result.Names = names.ToImmutable();
+            result.UserAliases = aliases.ToImmutable();
+            return result;
         }
-
         var globalNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var type in compilation.GlobalNamespace.GetTypeMembers())
         {
@@ -264,7 +475,14 @@ internal static class TypeAliasResolver
             }
         }
 
-        return new AliasResolutionResult(aliases.ToImmutable(), skipped.ToImmutable().Distinct().ToImmutableArray());
+        var result = new AliasResolutionResult(
+            aliases.ToImmutable(), skipped.ToImmutable().Distinct().ToImmutableArray());
+        if (ResultCache.Count > 8)
+        {
+            ResultCache.Clear();
+        }
+
+        return ResultCache.GetOrAdd(resultKey, result);
     }
 
     private static bool CanUseInGlobalAlias(INamedTypeSymbol type, Compilation compilation)

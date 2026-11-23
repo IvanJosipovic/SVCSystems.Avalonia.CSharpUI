@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Text;
@@ -113,6 +115,7 @@ internal sealed class GenerationResultComparer : IEqualityComparer<GenerationRes
     public bool Equals(GenerationResult? x, GenerationResult? y) =>
         ReferenceEquals(x, y) ||
         (x is not null && y is not null &&
+         x.GetHashCode() == y.GetHashCode() &&
          x.Sources.SequenceEqual(y.Sources) &&
          x.Diagnostics.SequenceEqual(y.Diagnostics));
 
@@ -125,7 +128,18 @@ internal sealed class GenerationResultComparer : IEqualityComparer<GenerationRes
 /// </summary>
 public sealed class UsageDrivenMarkupGenerator
 {
+    private sealed class TextBox
+    {
+        internal string Text = string.Empty;
+    }
+
+    // Metadata control symbols are reused across compilations; caching the emitted text per
+    // symbol avoids rebuilding dozens of factory methods and registrations on every edit.
+    private static readonly ConditionalWeakTable<INamedTypeSymbol, TextBox> FactoryMethodCache = new();
+    private static readonly ConditionalWeakTable<INamedTypeSymbol, TextBox> RegistrationCache = new();
+
     private static readonly ExternalGeneratorHost SharedHost = new();
+    private static readonly ConcurrentDictionary<string, DiagnosticDescriptor> Descriptors = new(StringComparer.Ordinal);
 
     internal static readonly DiagnosticDescriptor ExtensionGenerationFailed = new(
         id: "SVCUIGEN003",
@@ -173,7 +187,8 @@ public sealed class UsageDrivenMarkupGenerator
         // diagnostics unchanged, instead of re-adding every file on each keystroke.
         var generation = input
             .Select(static (pair, cancellationToken) => Generate(pair.Left, pair.Right, cancellationToken))
-            .WithComparer(GenerationResultComparer.Instance);
+            .WithComparer(GenerationResultComparer.Instance)
+            .WithTrackingName("UsageDriven.Generate");
 
         context.RegisterSourceOutput(generation, static (sourceContext, result) =>
         {
@@ -184,15 +199,16 @@ public sealed class UsageDrivenMarkupGenerator
 
             foreach (var diagnostic in result.Diagnostics)
             {
-                sourceContext.ReportDiagnostic(Diagnostic.Create(
-                    new DiagnosticDescriptor(
+                var descriptor = Descriptors.GetOrAdd(
+                    diagnostic.Id + "\0" + diagnostic.Message,
+                    _ => new DiagnosticDescriptor(
                         diagnostic.Id,
                         diagnostic.Id,
                         diagnostic.Message,
                         "SVCSystems.Avalonia.CSharpUI",
                         diagnostic.Severity,
-                        isEnabledByDefault: true),
-                    Location.None));
+                        isEnabledByDefault: true));
+                sourceContext.ReportDiagnostic(Diagnostic.Create(descriptor, Location.None));
             }
         });
     }
@@ -221,9 +237,10 @@ public sealed class UsageDrivenMarkupGenerator
         var sources = new List<GeneratedSource>();
         var diagnostics = new List<GenerationDiagnostic>();
 
-        var catalog = ControlCatalog.Build(compilation);
-        var usage = UsageResolver.Resolve(catalog, names);
-        var publishing = ExtensionPublishing.Read(compilation);
+        var referenceHash = GenerationCache.GetReferenceHash(compilation, cancellationToken);
+        var catalog = ControlCatalog.Build(compilation, cancellationToken, referenceHash);
+        var usage = UsageResolver.Resolve(catalog, names, cancellationToken, referenceHash);
+        var publishing = ExtensionPublishing.Read(compilation, cancellationToken, referenceHash);
 
         if (publishing.OverlappingPublisherKeys.Count > 0)
         {
@@ -243,12 +260,13 @@ public sealed class UsageDrivenMarkupGenerator
         var extensionKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var key in usage.Keys)
         {
-            if (publishing.ReferencedCoverage.Contains(key.ToString()))
+            var keyText = key.ToString();
+            if (publishing.ReferencedCoverage.Contains(keyText))
             {
                 continue;
             }
 
-            extensionKeys.Add(key.ToString());
+            extensionKeys.Add(keyText);
         }
 
         foreach (var ambiguousName in usage.AmbiguousNames)
@@ -259,7 +277,6 @@ public sealed class UsageDrivenMarkupGenerator
                 DiagnosticSeverity.Info));
         }
 
-        var cache = new Dictionary<INamedTypeSymbol, ControlModel>(SymbolEqualityComparer.Default);
         var models = new List<ControlModel>();
         var publishedKeys = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var pair in publishing.CoverageOrigins)
@@ -277,7 +294,7 @@ public sealed class UsageDrivenMarkupGenerator
             ControlModel model;
             try
             {
-                model = ControlModelBuilder.Build(symbol, compilation.Assembly, cache);
+                model = ControlModelBuilder.Build(symbol, compilation.Assembly);
             }
             catch (Exception exception)
             {
@@ -314,14 +331,15 @@ public sealed class UsageDrivenMarkupGenerator
         var host = SharedHost;
         foreach (var model in models)
         {
-            if (!extensionKeys.Contains(TypeKey.Create(model.Type).ToString()))
+            var typeKey = TypeKey.Create(model.Type);
+            var keyText = typeKey.ToString();
+            if (!extensionKeys.Contains(keyText))
             {
                 continue;
             }
 
             try
             {
-                var typeKey = TypeKey.Create(model.Type);
                 var publish = publishing.IsPublisher &&
                     (publishing.RestrictedRoots is null || publishing.RestrictedRoots.Contains(typeKey)) &&
                     ExternalGeneratorHost.CanPublish(model.Type);
@@ -330,7 +348,8 @@ public sealed class UsageDrivenMarkupGenerator
                 // from the dedicated generators. Suppress just those overloads; the BindingBase and
                 // Style<T> setters below are not emitted anywhere else and must remain available.
                 var suppressOverlappingSetters = MarkupTypeHelpers.IsAvaloniaMarkupView(model.Type);
-                var code = host.GenerateExtensions(model, compilation, publish, suppressOverlappingSetters);
+                var code = host.GenerateExtensions(
+                    model, compilation, publish, suppressOverlappingSetters, referenceHash);
                 if (string.IsNullOrWhiteSpace(code))
                 {
                     continue;
@@ -338,7 +357,7 @@ public sealed class UsageDrivenMarkupGenerator
 
                 if (publish)
                 {
-                    publishedKeys[typeKey.ToString()] = publishing.AssemblyName;
+                    publishedKeys[keyText] = publishing.AssemblyName;
                 }
 
                 var typeName = model.Type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
@@ -418,34 +437,43 @@ public sealed class UsageDrivenMarkupGenerator
 
         foreach (var model in factories)
         {
-            var methodName = SymbolUtilities.CleanIdentifier(model.FactoryName) ?? model.Type.Name;
-            var typeName = model.Type.GetFullTypeName();
-            var controlDoc = SymbolUtilities.FormatXmlDoc(model.Type, compilation);
-            if (!string.IsNullOrWhiteSpace(controlDoc))
-            {
-                foreach (var line in controlDoc.Split('\n'))
-                {
-                    var trimmed = line.TrimEnd('\r');
-                    if (!string.IsNullOrWhiteSpace(trimmed))
-                    {
-                        source.AppendLine("    " + trimmed);
-                    }
-                }
-            }
-            else
-            {
-                source.AppendLine($"    /// <summary>Creates a new <see cref=\"{SymbolUtilities.GetCrefName(model.Type)}\"/>.</summary>");
-            }
-            source.AppendLine($"    public static {typeName} {methodName}([global::System.Runtime.CompilerServices.CallerFilePath] string? sourceFile = null, [global::System.Runtime.CompilerServices.CallerLineNumber] int sourceLine = 0)");
-            source.AppendLine("    {");
-            source.AppendLine($"        var control = new {typeName}();");
-            source.AppendLine("        global::SVCSystems.Avalonia.CSharpUI.SourceInfo.Set(control, sourceFile, sourceLine);");
-            source.AppendLine("        return control;");
-            source.AppendLine("    }");
+            source.Append(FactoryMethodCache.GetValue(model.Type, _ =>
+                new TextBox { Text = BuildFactoryMethod(model, compilation) }).Text);
         }
 
         source.AppendLine("}");
         sources.Add(new GeneratedSource("SVCSystemsCSharpUIControlFactories.g.cs", source.ToString()));
+    }
+
+    private static string BuildFactoryMethod(ControlModel model, Compilation compilation)
+    {
+        var methodName = SymbolUtilities.CleanIdentifier(model.FactoryName) ?? model.Type.Name;
+        var typeName = model.Type.GetFullTypeName();
+        var source = new StringBuilder(512);
+        var controlDoc = SymbolUtilities.FormatXmlDoc(model.Type, compilation);
+        if (!string.IsNullOrWhiteSpace(controlDoc))
+        {
+            foreach (var line in controlDoc.Split('\n'))
+            {
+                var trimmed = line.TrimEnd('\r');
+                if (!string.IsNullOrWhiteSpace(trimmed))
+                {
+                    source.AppendLine("    " + trimmed);
+                }
+            }
+        }
+        else
+        {
+            source.AppendLine($"    /// <summary>Creates a new <see cref=\"{SymbolUtilities.GetCrefName(model.Type)}\"/>.</summary>");
+        }
+
+        source.AppendLine($"    public static {typeName} {methodName}([global::System.Runtime.CompilerServices.CallerFilePath] string? sourceFile = null, [global::System.Runtime.CompilerServices.CallerLineNumber] int sourceLine = 0)");
+        source.AppendLine("    {");
+        source.AppendLine($"        var control = new {typeName}();");
+        source.AppendLine("        global::SVCSystems.Avalonia.CSharpUI.SourceInfo.Set(control, sourceFile, sourceLine);");
+        source.AppendLine("        return control;");
+        source.AppendLine("    }");
+        return source.ToString();
     }
 
     private static void GenerateRegistrations(List<GeneratedSource> sources, IReadOnlyList<ControlModel> models)
@@ -455,23 +483,29 @@ public sealed class UsageDrivenMarkupGenerator
             var typeIdentifier = SymbolUtilities.BuildTypeIdentifier(model.Type);
             var registrationClassName = $"{typeIdentifier}_ViewFactoryRegistration";
             var hintName = SymbolUtilities.RemoveIllegalFileNameCharacters(registrationClassName) + ".g.cs";
+            var code = RegistrationCache.GetValue(model.Type, _ =>
+                new TextBox { Text = BuildRegistration(registrationClassName, model.Type) }).Text;
 
-            var sb = new StringBuilder(256);
-            sb.AppendLine("#nullable enable");
-            sb.AppendLine("using System.Runtime.CompilerServices;");
-            sb.AppendLine("namespace SVCSystems.Avalonia.CSharpUI;");
-            sb.AppendLine($"internal static class {registrationClassName}");
-            sb.AppendLine("{");
-            sb.AppendLine("    [ModuleInitializer]");
-            sb.AppendLine("    internal static void Register()");
-            sb.AppendLine("    {");
-            var typeName = model.Type.GetFullTypeName();
-            sb.AppendLine($"        global::SVCSystems.Avalonia.CSharpUI.ViewFactoryRegistry.Register<{typeName}>(static () => new {typeName}());");
-            sb.AppendLine("    }");
-            sb.AppendLine("}");
-
-            sources.Add(new GeneratedSource(hintName, sb.ToString()));
+            sources.Add(new GeneratedSource(hintName, code));
         }
+    }
+
+    private static string BuildRegistration(string registrationClassName, INamedTypeSymbol type)
+    {
+        var sb = new StringBuilder(256);
+        sb.AppendLine("#nullable enable");
+        sb.AppendLine("using System.Runtime.CompilerServices;");
+        sb.AppendLine("namespace SVCSystems.Avalonia.CSharpUI;");
+        sb.AppendLine($"internal static class {registrationClassName}");
+        sb.AppendLine("{");
+        sb.AppendLine("    [ModuleInitializer]");
+        sb.AppendLine("    internal static void Register()");
+        sb.AppendLine("    {");
+        var typeName = type.GetFullTypeName();
+        sb.AppendLine($"        global::SVCSystems.Avalonia.CSharpUI.ViewFactoryRegistry.Register<{typeName}>(static () => new {typeName}());");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+        return sb.ToString();
     }
 
     private static bool IsRegistrationEligible(ControlModel model) =>

@@ -15,8 +15,8 @@ public sealed class Generator : IIncrementalGenerator
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         new UsageDrivenMarkupGenerator().Initialize(context);
-        new AvaloniaPropertyExtensionsGenerator().Initialize(context);
-        new AvaloniaEventExtensionsGenerator().Initialize(context);
+        // One class-declaration pass produces both property and event extensions.
+        ViewExtensionGenerator.Register(context, emitPropertyExtensions: true, emitEventExtensions: true);
         new XamlResourceGenerator().Initialize(context);
 
         context.RegisterPostInitializationOutput(static output => output.AddSource(
