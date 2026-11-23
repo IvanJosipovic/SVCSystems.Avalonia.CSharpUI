@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExtensionInfos;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -290,11 +291,28 @@ internal static class ControlModelBuilder
         return fields.Where(static field => field.IsAcceptableStyledField()).ToArray();
     }
 
-    internal static GeneratorMetadata GetMetadata(ISymbol symbol)
+    private const string MetadataAttributeName = "SVCSystemsCSharpUIGeneratorMetadataAttribute";
+    private const string MetadataAttributeFullName = "SVCSystems.Avalonia.CSharpUI." + MetadataAttributeName;
+    private sealed class MetadataHolder(GeneratorMetadata metadata)
+    {
+        internal GeneratorMetadata Metadata { get; } = metadata;
+    }
+
+    private static readonly ConditionalWeakTable<ISymbol, MetadataHolder> MetadataCache = new();
+
+    internal static GeneratorMetadata GetMetadata(ISymbol symbol) =>
+        MetadataCache.GetValue(symbol, static value => new MetadataHolder(ReadMetadata(value))).Metadata;
+
+    private static GeneratorMetadata ReadMetadata(ISymbol symbol)
     {
         foreach (var attribute in symbol.GetAttributes())
         {
-            if (attribute.AttributeClass?.ToDisplayString() != "SVCSystems.Avalonia.CSharpUI.SVCSystemsCSharpUIGeneratorMetadataAttribute")
+            // Attribute decoding is expensive; the simple name rejects almost every attribute
+            // without formatting it. Only matching names pay for the full metadata-name check.
+            var attributeClass = attribute.AttributeClass;
+            if (attributeClass is null ||
+                attributeClass.Name != MetadataAttributeName ||
+                attributeClass.ToDisplayString() != MetadataAttributeFullName)
             {
                 continue;
             }

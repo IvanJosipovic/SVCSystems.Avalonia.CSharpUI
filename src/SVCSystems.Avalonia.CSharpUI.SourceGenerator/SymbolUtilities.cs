@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -7,6 +9,14 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator;
 internal static class SymbolUtilities
 {
     internal const string NewLine = "\n";
+
+    // Symbols are canonical within a compilation, so a ConditionalWeakTable gives us a
+    // compilation-scoped cache with no lifetime risk: entries disappear with their symbols.
+    private static readonly ConditionalWeakTable<ISymbol, string> MetadataNames = new();
+    private static readonly ConditionalWeakTable<ITypeSymbol, string> FullTypeNames = new();
+    private static readonly ConcurrentDictionary<string, string> ShortNames = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, string?> CleanIdentifiers = new(StringComparer.Ordinal);
+    private static readonly HashSet<char> InvalidFileNameChars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
     internal static string FormatXmlDoc(ISymbol? symbol, Compilation? compilation = null) =>
         DocumentationLookup.GetDocumentation(symbol, compilation);
@@ -54,9 +64,14 @@ internal static class SymbolUtilities
 
     internal static bool IsOrInheritsFrom(this ITypeSymbol? symbol, string metadataName)
     {
+        // Most hierarchy levels have a different simple name from the type we are looking for.
+        // Checking that first avoids formatting a namespace on almost every step of every walk.
+        var shortName = ShortNames.GetOrAdd(metadataName,
+            static name => name.Substring(name.LastIndexOf('.') + 1));
+
         while (symbol != null)
         {
-            if (GetMetadataName(symbol) == metadataName)
+            if (symbol.Name == shortName && GetMetadataName(symbol) == metadataName)
             {
                 return true;
             }
@@ -114,45 +129,42 @@ internal static class SymbolUtilities
 
     internal static bool IsAvaloniaPropertyField(this IFieldSymbol field)
     {
-        if (field.IsObsolete())
+        // The type-name check is free; GetAttributes()/GetMembers() are not. Do it first.
+        if (!IsPropertyFieldType(field.Type.Name, attachedOnly: false))
         {
             return false;
         }
 
-        if (field.Type.Name.StartsWith("DirectProperty") ||
-            field.Type.Name.StartsWith("StyledProperty") ||
-            field.Type.Name.StartsWith("AttachedProperty") ||
-            field.Type.Name.StartsWith("AvaloniaProperty"))
-        {
-            return !field.IsReadOnlyField();
-        }
-
-        return false;
+        return !field.IsObsolete() && !field.IsReadOnlyField();
     }
 
-    internal static bool IsAttachedPropertyField(this IFieldSymbol field)
+    internal static bool IsAttachedPropertyField(this IFieldSymbol field) =>
+        IsPropertyFieldType(field.Type.Name, attachedOnly: true) &&
+        !field.IsObsolete() &&
+        !field.IsReadOnlyAttachedField();
+
+    internal static bool IsAcceptableStyledField(this IFieldSymbol field) =>
+        IsPropertyFieldType(field.Type.Name, styledOrAttachedOnly: true) &&
+        !field.IsObsolete() &&
+        !field.IsReadOnlyField();
+
+    private static bool IsPropertyFieldType(string name, bool attachedOnly = false, bool styledOrAttachedOnly = false)
     {
-        if (field.IsObsolete())
+        if (attachedOnly)
         {
-            return false;
+            return name.StartsWith("AttachedProperty", StringComparison.Ordinal);
         }
 
-        return field.Type.Name.StartsWith("AttachedProperty") && !field.IsReadOnlyAttachedField();
-    }
-
-    internal static bool IsAcceptableStyledField(this IFieldSymbol field)
-    {
-        if (field.IsObsolete())
+        if (styledOrAttachedOnly)
         {
-            return false;
+            return name.StartsWith("StyledProperty", StringComparison.Ordinal) ||
+                   name.StartsWith("AttachedProperty", StringComparison.Ordinal);
         }
 
-        if (field.Type.Name.StartsWith("StyledProperty") || field.Type.Name.StartsWith("AttachedProperty"))
-        {
-            return !field.IsReadOnlyField();
-        }
-
-        return false;
+        return name.StartsWith("DirectProperty", StringComparison.Ordinal) ||
+               name.StartsWith("StyledProperty", StringComparison.Ordinal) ||
+               name.StartsWith("AttachedProperty", StringComparison.Ordinal) ||
+               name.StartsWith("AvaloniaProperty", StringComparison.Ordinal);
     }
 
     internal static bool HasUnsupportedExternalValueType(this IFieldSymbol field)
@@ -214,17 +226,18 @@ internal static class SymbolUtilities
             .Replace('>', '}');
     }
 
-    internal static string GetFullTypeName(this ITypeSymbol symbol)
-    {
-        var fullName = symbol.ToDisplayString(FullyQualifiedGlobalFormat);
-
-        if (!fullName.EndsWith("?") && symbol.NullableAnnotation == NullableAnnotation.Annotated)
+    internal static string GetFullTypeName(this ITypeSymbol symbol) =>
+        FullTypeNames.GetValue(symbol, static type =>
         {
-            fullName += "?";
-        }
+            var fullName = type.ToDisplayString(FullyQualifiedGlobalFormat);
 
-        return fullName;
-    }
+            if (!fullName.EndsWith("?") && type.NullableAnnotation == NullableAnnotation.Annotated)
+            {
+                fullName += "?";
+            }
+
+            return fullName;
+        });
 
     internal static ITypeSymbol GetLastGenericArgument(this ITypeSymbol type)
     {
@@ -238,8 +251,26 @@ internal static class SymbolUtilities
 
     internal static string RemoveIllegalFileNameCharacters(string fileName)
     {
-        var invalidChars = new HashSet<char>(['<', '>', ':', '"', '/', '\\', '|', '?', '*']);
-        return string.Concat(fileName.Select(c => invalidChars.Contains(c) || char.IsControl(c) ? '_' : c));
+        foreach (var ch in fileName)
+        {
+            if (InvalidFileNameChars.Contains(ch) || char.IsControl(ch))
+            {
+                return SanitizeFileName(fileName);
+            }
+        }
+
+        return fileName;
+    }
+
+    private static string SanitizeFileName(string fileName)
+    {
+        var sb = new StringBuilder(fileName.Length);
+        foreach (var ch in fileName)
+        {
+            sb.Append(InvalidFileNameChars.Contains(ch) || char.IsControl(ch) ? '_' : ch);
+        }
+
+        return sb.ToString();
     }
 
     internal static string? CleanIdentifier(string name, bool @namespace = false)
@@ -251,7 +282,16 @@ internal static class SymbolUtilities
             return null;
         }
 
-        var sb = new StringBuilder();
+        // The mapping is compilation-independent, so it can be shared for the whole process.
+        // The namespace form is rare and needs different escaping, so it is not cached here.
+        return @namespace
+            ? CleanIdentifierCore(name, @namespace: true)
+            : CleanIdentifiers.GetOrAdd(name, static value => CleanIdentifierCore(value, @namespace: false)!);
+    }
+
+    private static string? CleanIdentifierCore(string name, bool @namespace)
+    {
+        var sb = new StringBuilder(name.Length + 1);
         if (!SyntaxFacts.IsIdentifierStartCharacter(name[0]))
         {
             sb.Append('_');
@@ -315,9 +355,10 @@ internal static class SymbolUtilities
         return CleanIdentifier(string.Join("_", parts)) ?? "Unknown";
     }
 
-    private static string GetMetadataName(ISymbol symbol)
-    {
-        var ns = symbol.ContainingNamespace?.ToDisplayString();
-        return string.IsNullOrWhiteSpace(ns) ? symbol.Name : $"{ns}.{symbol.Name}";
-    }
+    private static string GetMetadataName(ISymbol symbol) =>
+        MetadataNames.GetValue(symbol, static value =>
+        {
+            var ns = value.ContainingNamespace?.ToDisplayString();
+            return string.IsNullOrWhiteSpace(ns) ? value.Name : ns + "." + value.Name;
+        });
 }

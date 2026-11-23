@@ -8,11 +8,23 @@ using SVCSystems.Avalonia.CSharpUI.SourceGenerator.Usage;
 
 namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
 
-internal readonly struct GeneratedSource(string hintName, string text) : IEquatable<GeneratedSource>
+internal readonly struct GeneratedSource : IEquatable<GeneratedSource>
 {
-    internal string HintName { get; } = hintName;
+    private readonly int _hash;
 
-    internal string Text { get; } = text;
+    internal GeneratedSource(string hintName, string text)
+    {
+        HintName = hintName;
+        Text = text;
+        unchecked
+        {
+            _hash = ((hintName?.GetHashCode() ?? 0) * 397) ^ (text?.GetHashCode() ?? 0);
+        }
+    }
+
+    internal string HintName { get; }
+
+    internal string Text { get; }
 
     public bool Equals(GeneratedSource other) =>
         string.Equals(HintName, other.HintName, StringComparison.Ordinal) &&
@@ -20,22 +32,30 @@ internal readonly struct GeneratedSource(string hintName, string text) : IEquata
 
     public override bool Equals(object? obj) => obj is GeneratedSource other && Equals(other);
 
-    public override int GetHashCode()
-    {
-        unchecked
-        {
-            return ((HintName?.GetHashCode() ?? 0) * 397) ^ (Text?.GetHashCode() ?? 0);
-        }
-    }
+    public override int GetHashCode() => _hash;
 }
 
-internal readonly struct GenerationDiagnostic(string id, string message, DiagnosticSeverity severity) : IEquatable<GenerationDiagnostic>
+internal readonly struct GenerationDiagnostic : IEquatable<GenerationDiagnostic>
 {
-    internal string Id { get; } = id;
+    private readonly int _hash;
 
-    internal string Message { get; } = message;
+    internal GenerationDiagnostic(string id, string message, DiagnosticSeverity severity)
+    {
+        Id = id;
+        Message = message;
+        Severity = severity;
+        unchecked
+        {
+            var hash = (id?.GetHashCode() ?? 0) * 397 ^ (message?.GetHashCode() ?? 0);
+            _hash = (hash * 397) ^ (int)severity;
+        }
+    }
 
-    internal DiagnosticSeverity Severity { get; } = severity;
+    internal string Id { get; }
+
+    internal string Message { get; }
+
+    internal DiagnosticSeverity Severity { get; }
 
     public bool Equals(GenerationDiagnostic other) =>
         string.Equals(Id, other.Id, StringComparison.Ordinal) &&
@@ -44,27 +64,46 @@ internal readonly struct GenerationDiagnostic(string id, string message, Diagnos
 
     public override bool Equals(object? obj) => obj is GenerationDiagnostic other && Equals(other);
 
-    public override int GetHashCode()
-    {
-        unchecked
-        {
-            var hash = (Id?.GetHashCode() ?? 0) * 397 ^ (Message?.GetHashCode() ?? 0);
-            return (hash * 397) ^ (int)Severity;
-        }
-    }
+    public override int GetHashCode() => _hash;
 }
 
 /// <summary>
 /// The complete generated output for one compilation. Equality is based on the generated text, so
 /// Roslyn caches the registered source output across edits that don't change the generated APIs.
 /// </summary>
-internal sealed class GenerationResult(
-    ImmutableArray<GeneratedSource> sources,
-    ImmutableArray<GenerationDiagnostic> diagnostics)
+internal sealed class GenerationResult
 {
-    internal ImmutableArray<GeneratedSource> Sources { get; } = sources;
+    private readonly int _hash;
 
-    internal ImmutableArray<GenerationDiagnostic> Diagnostics { get; } = diagnostics;
+    internal GenerationResult(
+        ImmutableArray<GeneratedSource> sources,
+        ImmutableArray<GenerationDiagnostic> diagnostics)
+    {
+        Sources = sources;
+        Diagnostics = diagnostics;
+
+        unchecked
+        {
+            var hash = 17;
+            foreach (var source in sources)
+            {
+                hash = (hash * 31) + source.GetHashCode();
+            }
+
+            foreach (var diagnostic in diagnostics)
+            {
+                hash = (hash * 31) + diagnostic.GetHashCode();
+            }
+
+            _hash = hash;
+        }
+    }
+
+    internal ImmutableArray<GeneratedSource> Sources { get; }
+
+    internal ImmutableArray<GenerationDiagnostic> Diagnostics { get; }
+
+    public override int GetHashCode() => _hash;
 }
 
 internal sealed class GenerationResultComparer : IEqualityComparer<GenerationResult>
@@ -77,24 +116,7 @@ internal sealed class GenerationResultComparer : IEqualityComparer<GenerationRes
          x.Sources.SequenceEqual(y.Sources) &&
          x.Diagnostics.SequenceEqual(y.Diagnostics));
 
-    public int GetHashCode(GenerationResult result)
-    {
-        unchecked
-        {
-            var hash = 17;
-            foreach (var source in result.Sources)
-            {
-                hash = (hash * 31) + source.GetHashCode();
-            }
-
-            foreach (var diagnostic in result.Diagnostics)
-            {
-                hash = (hash * 31) + diagnostic.GetHashCode();
-            }
-
-            return hash;
-        }
-    }
+    public int GetHashCode(GenerationResult result) => result.GetHashCode();
 }
 
 /// <summary>
@@ -103,6 +125,8 @@ internal sealed class GenerationResultComparer : IEqualityComparer<GenerationRes
 /// </summary>
 public sealed class UsageDrivenMarkupGenerator
 {
+    private static readonly ExternalGeneratorHost SharedHost = new();
+
     internal static readonly DiagnosticDescriptor ExtensionGenerationFailed = new(
         id: "SVCUIGEN003",
         title: "Avalonia extension generation failed",
@@ -174,6 +198,20 @@ public sealed class UsageDrivenMarkupGenerator
     }
 
     private static GenerationResult Generate(
+        ImmutableArray<string> names,
+        Compilation compilation,
+        CancellationToken cancellationToken)
+    {
+        // The compilation object changes on every keystroke, but the generated output usually
+        // does not. Fingerprinting the semantic inputs lets us reuse the previous result for
+        // comment/whitespace-only edits and avoid the full catalog + emit pipeline.
+        var fingerprint = GenerationFingerprint.Create(names, compilation, cancellationToken);
+        return GenerationCache.GetOrAdd(
+            fingerprint,
+            () => GenerateCore(names, compilation, cancellationToken));
+    }
+
+    private static GenerationResult GenerateCore(
         ImmutableArray<string> names,
         Compilation compilation,
         CancellationToken cancellationToken)
@@ -273,7 +311,7 @@ public sealed class UsageDrivenMarkupGenerator
             }
         }
 
-        var host = new ExternalGeneratorHost();
+        var host = SharedHost;
         foreach (var model in models)
         {
             if (!extensionKeys.Contains(TypeKey.Create(model.Type).ToString()))
@@ -317,7 +355,7 @@ public sealed class UsageDrivenMarkupGenerator
         }
 
         var factoryTargets = GetFactoryTargets(models);
-        GenerateFactoryUsings(sources, diagnostics, compilation, factoryTargets);
+        GenerateFactoryUsings(sources, diagnostics, compilation, factoryTargets, cancellationToken);
         GenerateFactories(sources, compilation, factoryTargets);
         GenerateRegistrations(sources, GetRegistrationTargets(models));
 
@@ -335,12 +373,13 @@ public sealed class UsageDrivenMarkupGenerator
         List<GeneratedSource> sources,
         List<GenerationDiagnostic> diagnostics,
         Compilation compilation,
-        IReadOnlyList<ControlModel> factories)
+        IReadOnlyList<ControlModel> factories,
+        CancellationToken cancellationToken)
     {
         var factoryNames = new HashSet<string>(
             factories.Select(static model => SymbolUtilities.CleanIdentifier(model.FactoryName) ?? model.Type.Name),
             StringComparer.Ordinal);
-        var resolution = TypeAliasResolver.Resolve(compilation, factoryNames);
+        var resolution = TypeAliasResolver.Resolve(compilation, factoryNames, cancellationToken);
 
         foreach (var skipped in resolution.Skipped)
         {

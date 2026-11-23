@@ -96,3 +96,14 @@ dotnet test
 ```
 
 The library targets `net10.0` and `net11.0`. The source generator targets `netstandard2.0` so it can run in compiler hosts used by supported IDEs.
+
+## Benchmarks
+
+The generator benchmark project measures cold generation and incremental IDE-style edits, with a step-level profiler and allocation statistics:
+
+```bash
+dotnet run --project benchmarks/SVCSystems.Avalonia.CSharpUI.SourceGenerator.Benchmarks -c Release -- --profile
+dotnet run --project benchmarks/SVCSystems.Avalonia.CSharpUI.SourceGenerator.Benchmarks -c Release -- --filter '*'
+```
+
+See [the performance review](docs/performance-review.md) for findings, before/after numbers, and remaining optimization opportunities.

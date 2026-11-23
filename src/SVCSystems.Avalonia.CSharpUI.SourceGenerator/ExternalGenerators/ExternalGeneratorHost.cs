@@ -12,7 +12,9 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
 
 internal sealed class ExternalGeneratorHost
 {
-    private readonly ExtensionGroupGenerator[] _groupGenerators =
+    // All generators are stateless; one shared array avoids reallocating the whole emission
+    // pipeline for each compilation's generation pass.
+    private static readonly ExtensionGroupGenerator[] GroupGenerators =
     [
         new("Properties",
             static (model, compilation) => GetPropertyInfos(model, compilation),
@@ -74,16 +76,32 @@ internal sealed class ExternalGeneratorHost
             .Where(static eventModel => !eventModel.IsIgnored && eventModel.InheritanceKind != PropertyInheritanceKind.Override)
             .Select(eventModel => new EventExtensionInfo(eventModel.Symbol, eventModel.ExtensionName, compilation));
 
-    internal static IEnumerable<PropertyExtensionInfo> GetStyleInfos(ControlModel model, Compilation? compilation = null) =>
-        !model.Type.IsStyledElement()
-            ? []
-            : model.StylePropertyFields
-                .Where(static x => !x.HasUnsupportedExternalValueType())
-                .Where(static field => !ControlModelBuilder.GetMetadata(field).Ignore)
-                .Select(field => new PropertyExtensionInfo(
-                    field,
-                    ControlModelBuilder.GetMetadata(field).Alias,
-                    compilation));
+    internal static IEnumerable<PropertyExtensionInfo> GetStyleInfos(ControlModel model, Compilation? compilation = null)
+    {
+        if (!model.Type.IsStyledElement())
+        {
+            return [];
+        }
+
+        var result = new List<PropertyExtensionInfo>();
+        foreach (var field in model.StylePropertyFields)
+        {
+            if (field.HasUnsupportedExternalValueType())
+            {
+                continue;
+            }
+
+            var metadata = ControlModelBuilder.GetMetadata(field);
+            if (metadata.Ignore)
+            {
+                continue;
+            }
+
+            result.Add(new PropertyExtensionInfo(field, metadata.Alias, compilation));
+        }
+
+        return result;
+    }
 
     public string? GenerateExtensions(
         INamedTypeSymbol controlType,
@@ -105,7 +123,7 @@ internal sealed class ExternalGeneratorHost
 
         List<(string GroupName, string Extensions)>? generatedGroups = null;
 
-        foreach (var groupGenerator in _groupGenerators)
+        foreach (var groupGenerator in GroupGenerators)
         {
             var extensions = groupGenerator.Generate(controlModel, compilation, suppressOverlappingSetters, out var generatedCount);
             if (generatedCount == 0 || string.IsNullOrWhiteSpace(extensions))

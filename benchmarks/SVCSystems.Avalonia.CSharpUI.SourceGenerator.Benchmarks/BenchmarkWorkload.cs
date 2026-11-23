@@ -1,0 +1,166 @@
+using System.Collections.Immutable;
+using System.Reflection;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+
+namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.Benchmarks;
+
+/// <summary>
+/// Builds a deterministic, medium-sized compilation that exercises every part of the generator:
+/// many local views, many simple names, all curated common controls and a XAML resource request.
+/// </summary>
+internal static class BenchmarkWorkload
+{
+    internal static readonly CSharpParseOptions ParseOptions = new(LanguageVersion.Preview);
+
+    private const int ViewCount = 40;
+    private const string EditableFileName = "EditableView.cs";
+
+    private static readonly string[] Controls =
+    [
+        "Button", "TextBlock", "TextBox", "StackPanel", "Grid", "Border", "Image",
+        "CheckBox", "ComboBox", "ListBox", "Slider", "ProgressBar", "TabControl",
+        "Menu", "ToolTip", "Expander", "ScrollViewer", "UniformGrid", "WrapPanel",
+        "Canvas", "DockPanel", "Separator", "ToggleButton", "RadioButton"
+    ];
+
+    internal static ImmutableArray<MetadataReference> References { get; } = CreateReferences();
+
+    /// <summary>The unmodified compilation (baseline for cold and incremental benchmarks).</summary>
+    internal static Compilation Base { get; } = CreateCompilation(editableSuffix: string.Empty);
+
+    /// <summary>Same compilation with an edit that does not change any simple name.</summary>
+    internal static Compilation IrrelevantEdit { get; } =
+        CreateCompilation(editableSuffix: "// a comment that changes no simple name");
+
+    /// <summary>Same compilation with an edit that introduces a new simple name.</summary>
+    internal static Compilation NameEdit { get; } =
+        CreateCompilation(editableSuffix: "var _ = new CalendarDatePicker();");
+
+    /// <summary>
+    /// Distinct compilations for cold/real-edit iterations. The generator's static caches hold only
+    /// a handful of results, so cycling through these forces genuine regeneration each iteration
+    /// instead of accidentally benchmarking a cache hit.
+    /// </summary>
+    internal static Compilation[] ColdVariants { get; } = CreateVariants("cold");
+
+    internal static Compilation[] NameVariants { get; } = CreateVariants("name");
+
+    private static Compilation[] CreateVariants(string prefix) =>
+        Enumerable.Range(0, 8)
+            .Select(index => CreateCompilation(editableSuffix: $"int {prefix}{index} = {index};"))
+            .ToArray();
+
+    internal static string EditableTreePath => EditableFileName;
+
+    private static Compilation CreateCompilation(string editableSuffix)
+    {
+        var trees = new List<SyntaxTree>(ViewCount + 2);
+
+        for (var i = 0; i < ViewCount; i++)
+        {
+            // Mix factory-style calls (simple names) and object creation so both syntax shapes
+            // are present. Include inheritance and generic names to widen the syntax surface.
+            var body = new System.Text.StringBuilder(1024);
+            for (var c = 0; c < Controls.Length; c++)
+            {
+                body.Append("        _ = new ").Append(Controls[c]).Append("();\n");
+            }
+
+            body.Append("        _ = new System.Collections.Generic.List<").Append(Controls[i % Controls.Length]).Append(">();\n");
+            body.Append("        object value").Append(i).Append(" = null;\n");
+            body.Append("        System.Console.WriteLine(value").Append(i).Append(");\n");
+            if (i == 0 && editableSuffix.Length > 0)
+            {
+                body.Append("        ").AppendLine(editableSuffix);
+            }
+
+            var source = new System.Text.StringBuilder(1400)
+                .AppendLine("using Avalonia.Controls;")
+                .AppendLine("using System;")
+                .AppendLine("namespace Bench.Views;")
+                .AppendLine()
+                .Append("public sealed class BenchmarkView").Append(i)
+                .AppendLine(" : SVCSystems.Avalonia.CSharpUI.ViewBase<object>")
+                .AppendLine("{")
+                .Append("    public BenchmarkView").Append(i).AppendLine("() : base(new object()) { }")
+                .AppendLine()
+                .AppendLine("    protected override object Build(object vm)")
+                .AppendLine("    {")
+                .Append(body)
+                .AppendLine("        return new StackPanel();")
+                .AppendLine("    }")
+                .AppendLine("}")
+                .ToString();
+
+            trees.Add(CSharpSyntaxTree.ParseText(source, ParseOptions,
+                path: i == 0 ? EditableFileName : $"View{i}.cs"));
+        }
+
+        trees.Add(CSharpSyntaxTree.ParseText(
+            "[assembly: SVCSystems.Avalonia.CSharpUI.GenerateMarkupControl(typeof(Avalonia.Controls.Button), typeof(Avalonia.Controls.TextBlock))]\n" +
+            "[assembly: System.Runtime.Versioning.TargetFramework(\".NETCoreApp,Version=v10.0\")]\n",
+            ParseOptions, path: "AssemblyAttributes.cs"));
+
+        return CSharpCompilation.Create("GeneratorBenchmarkCompilation",
+            trees, References, new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+    }
+
+    private static ImmutableArray<MetadataReference> CreateReferences()
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var trusted = (string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES");
+        if (trusted is not null)
+        {
+            foreach (var path in trusted.Split(Path.PathSeparator))
+            {
+                if (!string.IsNullOrEmpty(path))
+                {
+                    paths.Add(path);
+                }
+            }
+        }
+
+        // Force-load the assemblies whose types the generator looks up.
+        _ = typeof(global::Avalonia.AvaloniaObject).Assembly;
+        _ = typeof(global::Avalonia.Controls.Button).Assembly;
+        _ = typeof(global::Avalonia.Styling.Style).Assembly;
+        _ = typeof(global::Avalonia.Media.Brush).Assembly;
+        _ = typeof(global::Avalonia.Input.InputElement).Assembly;
+        _ = typeof(SVCSystems.Avalonia.CSharpUI.ViewBase).Assembly;
+
+        // Include every managed assembly next to the benchmark binary. This mirrors a real
+        // application's reference set (Avalonia.Base, Avalonia.Controls, Avalonia.Markup, ...).
+        var outputDirectory = Path.GetDirectoryName(typeof(BenchmarkWorkload).Assembly.Location);
+        if (outputDirectory is not null)
+        {
+            foreach (var path in Directory.EnumerateFiles(outputDirectory, "*.dll"))
+            {
+                if (IsManagedAssembly(path))
+                {
+                    paths.Add(path);
+                }
+            }
+        }
+
+        return [.. paths.Where(File.Exists).Select(static path => MetadataReference.CreateFromFile(path))];
+    }
+
+    private static bool IsManagedAssembly(string path)
+    {
+        try
+        {
+            _ = AssemblyName.GetAssemblyName(path);
+            return true;
+        }
+        catch (BadImageFormatException)
+        {
+            return false;
+        }
+        catch (FileLoadException)
+        {
+            return false;
+        }
+    }
+}
