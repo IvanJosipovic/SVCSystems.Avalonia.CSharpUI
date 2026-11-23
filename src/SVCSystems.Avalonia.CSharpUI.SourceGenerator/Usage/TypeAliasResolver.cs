@@ -97,7 +97,7 @@ internal static class TypeAliasResolutionCache
     private sealed class Entry
     {
         internal int FactoryHash;
-        internal ulong ReferenceHash;
+        internal ulong SemanticHash;
         internal TreeResolution Resolution = null!;
     }
 
@@ -106,12 +106,12 @@ internal static class TypeAliasResolutionCache
     internal static bool TryGet(
         SyntaxTree tree,
         int factoryHash,
-        ulong referenceHash,
+        ulong semanticHash,
         out TreeResolution resolution)
     {
         if (Entries.TryGetValue(tree, out var entry) &&
             entry.FactoryHash == factoryHash &&
-            entry.ReferenceHash == referenceHash)
+            entry.SemanticHash == semanticHash)
         {
             resolution = entry.Resolution;
             return true;
@@ -124,12 +124,12 @@ internal static class TypeAliasResolutionCache
     internal static void Add(
         SyntaxTree tree,
         int factoryHash,
-        ulong referenceHash,
+        ulong semanticHash,
         TreeResolution resolution) =>
         Entries.GetValue(tree, _ => new Entry
         {
             FactoryHash = factoryHash,
-            ReferenceHash = referenceHash,
+            SemanticHash = semanticHash,
             Resolution = resolution
         });
 }
@@ -241,11 +241,13 @@ internal static class TypeAliasResolver
         foreach (var syntaxTree in compilation.SyntaxTrees)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var treeKey = GenerationCache.GetTreeKey(syntaxTree, referenceHash);
+            // Include every source tree in the semantic key: a global using added in another file
+            // can change how this tree's names bind even when this tree itself is unchanged.
+            var treeKey = GenerationCache.GetTreeKey(syntaxTree, treeSetHash);
             TypeAliasBindingCache.TryGet(treeKey, out var cachedBindings);
             Dictionary<(string, string), TypeAliasBinding>? newBindings = null;
 
-            if (TypeAliasResolutionCache.TryGet(syntaxTree, factoryHashCode, referenceHash, out var cachedResolution))
+            if (TypeAliasResolutionCache.TryGet(syntaxTree, factoryHashCode, treeSetHash, out var cachedResolution))
             {
                 foreach (var alias in cachedResolution.UserAliases)
                 {
@@ -333,10 +335,11 @@ internal static class TypeAliasResolver
                     typesByName.Add(text, types);
                 }
 
-                if (types.Add(binding.DisplayName))
-                {
-                    resolvedNames.Add((text, binding.DisplayName));
-                }
+                // Record this tree's binding unconditionally. The whole-compilation set is only for
+                // detecting ambiguity; another tree may later remove the same binding, and this
+                // tree's cached resolution must still contain it.
+                types.Add(binding.DisplayName);
+                resolvedNames.Add((text, binding.DisplayName));
             }
 
             if (newBindings is not null)
@@ -355,7 +358,7 @@ internal static class TypeAliasResolver
                 TypeAliasBindingCache.Add(treeKey, newBindings);
             }
 
-            TypeAliasResolutionCache.Add(syntaxTree, factoryHashCode, referenceHash, new TreeResolution
+            TypeAliasResolutionCache.Add(syntaxTree, factoryHashCode, treeSetHash, new TreeResolution
             {
                 Bindings = resolvedNames.ToImmutable(),
                 SkippedNames = skippedNames.ToImmutable(),
@@ -426,6 +429,10 @@ internal static class TypeAliasResolver
                 {
                     QualifiedNameSyntax qualified when qualified.Right == name => qualified.Left.ToString(),
                     MemberAccessExpressionSyntax memberAccess when memberAccess.Name == name => memberAccess.Expression.ToString(),
+                    // A::Button and B::Button bind to different namespaces; their aliases must stay
+                    // distinct keys so an ambiguity is reported instead of reusing one binding.
+                    AliasQualifiedNameSyntax aliasQualified when aliasQualified.Name == name =>
+                        aliasQualified.Alias.Identifier.ValueText + "::",
                     _ => string.Empty
                 };
 

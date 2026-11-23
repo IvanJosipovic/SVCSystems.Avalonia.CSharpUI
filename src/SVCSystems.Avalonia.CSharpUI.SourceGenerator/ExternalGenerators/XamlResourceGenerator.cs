@@ -44,8 +44,9 @@ public sealed class XamlResourceGenerator : IIncrementalGenerator
         // AttributeData from the assembly symbol.
         var requests = context.SyntaxProvider
             .CreateSyntaxProvider(
-                predicate: static (node, _) =>
-                    node is AttributeSyntax attribute && IsRequestAttributeName(attribute.Name),
+                // Do not pre-filter by identifier: a using alias can stand in for the attribute
+                // name. CreateRequest binds every candidate semantically to the real attribute.
+                predicate: static (node, _) => node is AttributeSyntax,
                 transform: static (ctx, cancellationToken) => CreateRequest(ctx, cancellationToken))
             .Where(static request => request is not null)
             .Select(static (request, _) => request!.Value)
@@ -60,18 +61,6 @@ public sealed class XamlResourceGenerator : IIncrementalGenerator
 
         context.RegisterSourceOutput(generation,
             static (sourceContext, result) => Emit(sourceContext, result));
-    }
-
-    private static bool IsRequestAttributeName(NameSyntax name)
-    {
-        var identifier = name switch
-        {
-            QualifiedNameSyntax qualified => qualified.Right.Identifier.ValueText,
-            AliasQualifiedNameSyntax aliasQualified => aliasQualified.Name.Identifier.ValueText,
-            IdentifierNameSyntax identifierName => identifierName.Identifier.ValueText,
-            _ => string.Empty
-        };
-        return identifier is "GenerateXamlResource" or "GenerateXamlResourceAttribute";
     }
 
     private static XamlRequest? CreateRequest(
@@ -248,6 +237,15 @@ public sealed class XamlResourceGenerator : IIncrementalGenerator
         const ulong offset = 14695981039346656037UL;
         const ulong prime = 1099511628211UL;
         var hash = GenerationCache.GetReferenceHash(compilation, cancellationToken);
+
+        // The duplicate-name check reads compilation-local types and SupportsAccessors reads
+        // assembly attributes, so a reference-only key can reuse output that no longer matches.
+        // The full fingerprint covers every input tree and reference that can affect either.
+        var fingerprint = GenerationFingerprint.Create([], compilation, cancellationToken);
+        hash = (hash ^ fingerprint.Hash1) * prime;
+        hash = (hash ^ fingerprint.Hash2) * prime;
+        hash = (hash ^ (SupportsAccessors(compilation) ? 1UL : 0UL)) * prime;
+
         foreach (var request in requests)
         {
             hash = (hash ^ (ulong)(request.Source?.GetHashCode() ?? 0)) * prime;
@@ -458,7 +456,10 @@ public sealed class XamlResourceGenerator : IIncrementalGenerator
     }
 
     private static bool SameLocation(Location left, Location right) =>
-        left.SourceTree?.FilePath == right.SourceTree?.FilePath &&
+        // The tree instance matters: equal paths and spans in different tree instances mean the
+        // request was re-created after an edit, and a retained location would be rejected by
+        // ReportDiagnostic because its tree is no longer in the current compilation.
+        ReferenceEquals(left.SourceTree, right.SourceTree) &&
         left.SourceSpan.Equals(right.SourceSpan) &&
         left.GetLineSpan().Equals(right.GetLineSpan());
 }

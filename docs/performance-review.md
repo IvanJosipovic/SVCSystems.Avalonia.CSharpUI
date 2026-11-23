@@ -62,12 +62,14 @@ Stage benchmarks (final, `BenchmarkArtifacts/Exhausted`):
 | `TypeAliasResolver.Resolve` | 1.563 ms | 18.4 µs |
 | All hot helpers | 34–81 ns | 7–82 ns |
 
-**Proof that generator code is no longer the bottleneck:** the sum of every measured generator
-stage on the real cached path is ≈0.12 ms, while a full generator run is 13.9 ms cold / 1.58 ms
-incremental. >99% of the remaining time is Roslyn driver work, semantic-model creation and parsing
-of generated trees — outside generator callbacks. The remaining stage costs are dominated by
-`GetReferenceHash` over ~200 metadata references (18 µs), which is inherent to invalidating caches
-when references change. No further change to generator code can materially reduce end-to-end time.
+**Measured stage costs vs end-to-end:** the sum of the isolated, cached generator stages in the
+table above is roughly 0.12 ms, while a full generator run is 13.9 ms cold / 1.58 ms incremental.
+These are separate measurements: the stage numbers time individual cached calls, while the
+end-to-end numbers time the whole driver run. Isolated cached stages do not, by themselves, prove
+where the remaining end-to-end time is spent. Attributing that remainder would require inclusive
+callback profiling of the same end-to-end scenario; it is not claimed here. The residual stage cost
+that is measurable comes from `GetReferenceHash` over ~200 metadata references (~18 µs), which is
+needed to invalidate caches when references change.
 ## What was wrong, and what changed
 
 ### 1. Critical — the whole pipeline ran on every keystroke
@@ -188,10 +190,12 @@ regression and quantified every remaining generator stage:
 - Extension emission 33 µs per control, writing straight into a shared `StringBuilder`.
 - All other helpers 8–82 ns; control models 17.7 ns on the real cached path.
 
-The residual generator-level time (~19 ms cold, ~1.5 ms cached, ~18.6 ms for a genuine new-control
-edit) is dominated by Roslyn driver work, semantic model creation and parsing the generated trees,
-all outside generator callbacks. The remaining generator stages are cached and sub-250 µs; further
-micro-optimization would add shared mutable state and correctness risk for no measurable gain.
+The end-to-end figures (~14 ms cold, ~1.6 ms comment edit, ~24 ms for a genuine new-control edit)
+measure the complete driver run, not just generator callbacks. The individually measured stages are
+cached and in the tens of microseconds or less. Whether the remainder is driver work or further
+generator work would need inclusive callback profiling of the same scenario; no allocation of that
+time is made here. Further caching changes add shared mutable state and correctness risk, so they
+are not pursued without profile evidence.
 ## Verification
 
 - `dotnet test` (net10.0 + net11.0): **288/288 passing**.

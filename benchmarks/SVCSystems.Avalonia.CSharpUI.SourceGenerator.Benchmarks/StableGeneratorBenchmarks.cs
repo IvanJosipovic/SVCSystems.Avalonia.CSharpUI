@@ -28,26 +28,19 @@ public class StableGeneratorBenchmarks
         return driver.GetRunResult();
     }
 
+    // RunGenerators returns a new driver. Keep _driver primed with Base so each invocation measures
+    // the same transition instead of reusing a driver already advanced by a previous iteration.
     [Benchmark(Description = "Stable: incremental identical compilation")]
-    public GeneratorDriverRunResult Incremental_Identical()
-    {
-        _driver = _driver.RunGenerators(BenchmarkWorkload.Base);
-        return _driver.GetRunResult();
-    }
+    public GeneratorDriverRunResult Incremental_Identical() =>
+        _driver.RunGenerators(BenchmarkWorkload.Base).GetRunResult();
 
     [Benchmark(Description = "Stable: incremental comment-only edit")]
-    public GeneratorDriverRunResult Incremental_CommentEdit()
-    {
-        _driver = _driver.RunGenerators(BenchmarkWorkload.IrrelevantEdit);
-        return _driver.GetRunResult();
-    }
+    public GeneratorDriverRunResult Incremental_CommentEdit() =>
+        _driver.RunGenerators(BenchmarkWorkload.IrrelevantEdit).GetRunResult();
 
     [Benchmark(Description = "Stable: incremental code edit (new control name)")]
-    public GeneratorDriverRunResult Incremental_NameEdit()
-    {
-        _driver = _driver.RunGenerators(BenchmarkWorkload.NameVariants[_variantIndex++ % 8]);
-        return _driver.GetRunResult();
-    }
+    public GeneratorDriverRunResult Incremental_NameEdit() =>
+        _driver.RunGenerators(BenchmarkWorkload.NameVariants[_variantIndex++ % 8]).GetRunResult();
 
     private static GeneratorDriver CreateDriver() =>
         CSharpGeneratorDriver.Create(

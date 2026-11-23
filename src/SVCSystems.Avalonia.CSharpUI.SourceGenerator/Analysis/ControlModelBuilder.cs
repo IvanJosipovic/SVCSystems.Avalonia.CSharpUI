@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExtensionInfos;
 using Microsoft.CodeAnalysis;
@@ -9,7 +10,7 @@ internal static class ControlModelBuilder
 {
     private sealed class ModelHolder
     {
-        internal Dictionary<string, ControlModel> ByAssembly { get; } = new(StringComparer.Ordinal);
+        internal ConcurrentDictionary<string, ControlModel> ByAssembly { get; } = new(StringComparer.Ordinal);
     }
 
     // Metadata type symbols are reused across compilations that share references. Cache the

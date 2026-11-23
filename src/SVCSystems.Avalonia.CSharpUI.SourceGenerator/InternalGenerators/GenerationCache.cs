@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -53,6 +54,10 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
     // two images of different assemblies (or different versions of the same assembly).
     private static readonly ConditionalWeakTable<PortableExecutableReference, UlongBox> MetadataIdHashCache = new();
 
+    // Non-PE references (for example CompilationReference) expose no stable content id. They get a
+    // fresh key on every call so reference-keyed caches cannot reuse results across API changes.
+    private static long _nonPeUniqueKey;
+
     // Roslyn reuses the same SyntaxTree instance for every file that the user did not edit.
     // Caching each tree's token hash means an edit only rehashes the edited file instead of
     // re-walking the whole compilation on every keystroke.
@@ -74,11 +79,8 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
         foreach (var tree in compilation.SyntaxTrees)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (IsGeneratedTree(tree))
-            {
-                continue;
-            }
-
+            // Hash every input tree: a ".g.cs" file can still be a user input that affects
+            // generation, so the filename must not decide which inputs are part of the key.
             var treeHash = GetTreeHash(tree, cancellationToken);
             hash1 = (hash1 ^ treeHash.Hash1) * Prime1;
             hash2 = (hash2 ^ treeHash.Hash2) * Prime2;
@@ -96,22 +98,27 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (reference is not PortableExecutableReference)
+            {
+                // No stable content id is available; give this compilation a unique key so no
+                // reference-keyed cache can return a result computed from different metadata.
+                hash = (ulong)Interlocked.Increment(ref _nonPeUniqueKey) * Prime1;
+                return hash;
+            }
+
             // Display distinguishes file references by path and keeps references that cannot be
             // opened from colliding with each other.
             Add(ref hash, reference.Display ?? string.Empty);
 
-            if (reference is PortableExecutableReference portable)
+            try
             {
-                try
-                {
-                    var metadataHash = MetadataIdHashCache.GetValue(portable, static reference =>
-                        new UlongBox((ulong)(reference.GetMetadata()?.Id.GetHashCode() ?? 0))).Value;
-                    Add(ref hash, metadataHash.ToString("x"));
-                }
-                catch (Exception exception) when (exception is BadImageFormatException or IOException)
-                {
-                    // A reference that cannot be opened is already identified by Display.
-                }
+                var metadataHash = MetadataIdHashCache.GetValue((PortableExecutableReference)reference, static reference =>
+                    new UlongBox((ulong)(reference.GetMetadata()?.Id.GetHashCode() ?? 0))).Value;
+                Add(ref hash, metadataHash.ToString("x"));
+            }
+            catch (Exception exception) when (exception is BadImageFormatException or IOException)
+            {
+                // A reference that cannot be opened is already identified by Display.
             }
         }
 
@@ -160,12 +167,6 @@ internal readonly struct GenerationFingerprint : IEquatable<GenerationFingerprin
         hash = (hash ^ treeHash.Hash1) * Prime1;
         hash = (hash ^ treeHash.Hash2) * Prime2;
         return hash;
-    }
-
-    private static bool IsGeneratedTree(SyntaxTree tree)
-    {
-        var path = tree.FilePath;
-        return path is not null && path.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void Add(ref ulong hash, string value)

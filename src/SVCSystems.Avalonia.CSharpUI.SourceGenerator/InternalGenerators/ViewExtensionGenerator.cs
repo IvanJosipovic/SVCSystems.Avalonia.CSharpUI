@@ -68,7 +68,8 @@ internal static class ViewExtensionGenerator
         var targets = context.SyntaxProvider
             .CreateSyntaxProvider(
                 predicate: static (node, _) => node is ClassDeclarationSyntax,
-                transform: static (ctx, cancellationToken) => Analyze(ctx, cancellationToken))
+                transform: (ctx, cancellationToken) =>
+                    Analyze(ctx, emitPropertyExtensions, emitEventExtensions, cancellationToken))
             .Where(static targets => !targets.IsDefaultOrEmpty)
             .SelectMany(static (targets, _) => targets)
             .WithComparer(TargetComparer.Instance)
@@ -88,6 +89,8 @@ internal static class ViewExtensionGenerator
 
     private static ImmutableArray<Target> Analyze(
         GeneratorSyntaxContext context,
+        bool emitPropertyExtensions,
+        bool emitEventExtensions,
         CancellationToken cancellationToken)
     {
         var classDeclaration = (ClassDeclarationSyntax)context.Node;
@@ -100,9 +103,13 @@ internal static class ViewExtensionGenerator
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        var propertyText = AvaloniaPropertyExtensionsGenerator.GenerateSource(
-            classDeclaration, context.SemanticModel, typeSymbol, cancellationToken);
-        var eventSource = AvaloniaEventExtensionsGenerator.GenerateSource(classDeclaration, cancellationToken);
+        var propertyText = emitPropertyExtensions
+            ? AvaloniaPropertyExtensionsGenerator.GenerateSource(
+                classDeclaration, context.SemanticModel, typeSymbol, cancellationToken)
+            : null;
+        var eventSource = emitEventExtensions
+            ? AvaloniaEventExtensionsGenerator.GenerateSource(classDeclaration, cancellationToken)
+            : null;
 
         if (propertyText is null && eventSource is null)
         {

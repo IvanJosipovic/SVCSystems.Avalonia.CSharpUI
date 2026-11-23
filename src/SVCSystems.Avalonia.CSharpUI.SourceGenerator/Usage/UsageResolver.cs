@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Microsoft.CodeAnalysis;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
 
@@ -34,7 +35,9 @@ internal static class UsageResolver
         public override int GetHashCode() => unchecked((int)(References ^ Names ^ Locals));
     }
 
-    private static readonly ConcurrentDictionary<CacheKey, UsageResult> Cache = new();
+    // A catalog is rebuilt whenever source can affect usage. Scoping the cache to the catalog
+    // instance guarantees that no inheritance, local-control or common-type change is missed.
+    private static readonly ConditionalWeakTable<ControlCatalog, ConcurrentDictionary<CacheKey, UsageResult>> Cache = new();
 
     internal static UsageResult Resolve(
         ControlCatalog catalog,
@@ -42,22 +45,18 @@ internal static class UsageResolver
         CancellationToken cancellationToken = default,
         ulong referenceHash = 0)
     {
+        var cache = Cache.GetValue(catalog, static _ => new ConcurrentDictionary<CacheKey, UsageResult>());
         var key = new CacheKey(
             referenceHash,
             HashNames(names),
             HashLocalControls(catalog));
-        if (Cache.TryGetValue(key, out var cached))
+        if (cache.TryGetValue(key, out var cached))
         {
             return cached;
         }
 
         var result = ResolveCore(catalog, names, cancellationToken);
-        if (Cache.Count > 8)
-        {
-            Cache.Clear();
-        }
-
-        return Cache.GetOrAdd(key, result);
+        return cache.GetOrAdd(key, result);
     }
 
     private static ulong HashNames(ImmutableArray<string> names)

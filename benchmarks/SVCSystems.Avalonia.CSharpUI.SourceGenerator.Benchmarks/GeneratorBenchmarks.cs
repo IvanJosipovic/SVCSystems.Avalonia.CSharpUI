@@ -18,6 +18,7 @@ public class GeneratorBenchmarks
     private GeneratorDriver _driver = null!;
     private int _editIndex;
     private int _variantIndex;
+    private int _xamlIndex;
 
     [GlobalSetup]
     public void Setup()
@@ -52,7 +53,8 @@ public class GeneratorBenchmarks
 
     [Benchmark(Description = "Cold: XAML resource generator only")]
     public GeneratorDriverRunResult Cold_XamlResources() =>
-        Run(CreateDriver(new XamlResourceGenerator()), BenchmarkWorkload.Xaml);
+        Run(CreateDriver(new XamlResourceGenerator()),
+            BenchmarkWorkload.XamlVariants[_xamlIndex++ % BenchmarkWorkload.XamlVariants.Length]);
 
     [Benchmark(Description = "Cold: combined property + event extensions (one class pass)")]
     public GeneratorDriverRunResult Cold_CombinedViewExtensions() =>
@@ -60,12 +62,11 @@ public class GeneratorBenchmarks
 
     // ---------- Incremental (reuse driver, as Roslyn does in the IDE) ----------
 
+    // GeneratorDriver.RunGenerators returns a new driver; keep _driver primed with Base so every
+    // invocation measures the same Base -> edit transition instead of chaining previous edits.
     [Benchmark(Description = "Incremental: identical compilation (ideal cache)")]
-    public GeneratorDriverRunResult Incremental_Identical()
-    {
-        _driver = _driver.RunGenerators(BenchmarkWorkload.Base);
-        return _driver.GetRunResult();
-    }
+    public GeneratorDriverRunResult Incremental_Identical() =>
+        _driver.RunGenerators(BenchmarkWorkload.Base).GetRunResult();
 
     [Benchmark(Description = "Incremental: edit that changes no simple name")]
     public GeneratorDriverRunResult Incremental_IrrelevantEdit()
@@ -73,16 +74,12 @@ public class GeneratorBenchmarks
         var compilation = (_editIndex++ & 1) == 0
             ? BenchmarkWorkload.IrrelevantEdit
             : BenchmarkWorkload.Base;
-        _driver = _driver.RunGenerators(compilation);
-        return _driver.GetRunResult();
+        return _driver.RunGenerators(compilation).GetRunResult();
     }
 
     [Benchmark(Description = "Incremental: edit that adds a control name")]
-    public GeneratorDriverRunResult Incremental_NameEdit()
-    {
-        _driver = _driver.RunGenerators(NextNameVariant());
-        return _driver.GetRunResult();
-    }
+    public GeneratorDriverRunResult Incremental_NameEdit() =>
+        _driver.RunGenerators(NextNameVariant()).GetRunResult();
 
     private Compilation NextColdVariant() =>
         BenchmarkWorkload.ColdVariants[_variantIndex++ % BenchmarkWorkload.ColdVariants.Length];

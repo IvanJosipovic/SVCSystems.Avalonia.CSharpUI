@@ -31,7 +31,6 @@ internal sealed class ControlCatalog
         internal Dictionary<string, List<CatalogEntry>> ByFactoryName = new(StringComparer.Ordinal);
         internal Dictionary<TypeKey, INamedTypeSymbol> ByKey = new();
         internal Dictionary<string, INamedTypeSymbol> AttachedHostsByName = new(StringComparer.Ordinal);
-        internal INamedTypeSymbol[] CommonTypes = [];
     }
 
     private static readonly ConcurrentDictionary<ulong, MetadataCatalog> MetadataByReferences = new();
@@ -130,10 +129,6 @@ internal sealed class ControlCatalog
                 Merge(assemblyEntries);
             }
 
-            merged.CommonTypes = [.. merged.ByKey
-                .Where(pair => commonTypeNames.Contains(pair.Key.TypeName))
-                .Select(pair => pair.Value)];
-
             if (referenceHash != 0)
             {
                 if (MetadataByReferences.Count > 8)
@@ -194,9 +189,14 @@ internal sealed class ControlCatalog
 
         if (metadata is not null)
         {
-            foreach (var type in metadata.CommonTypes)
+            // Common types are selected from the current compilation's attributes, so derive them
+            // on every Build instead of storing them in the reference-keyed metadata cache.
+            foreach (var pair in metadata.ByKey)
             {
-                common.Add(type);
+                if (commonTypeNames.Contains(pair.Key.TypeName))
+                {
+                    common.Add(pair.Value);
+                }
             }
         }
 
