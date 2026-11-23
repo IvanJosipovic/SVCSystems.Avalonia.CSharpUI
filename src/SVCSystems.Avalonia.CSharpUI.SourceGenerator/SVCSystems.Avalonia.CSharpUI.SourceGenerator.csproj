@@ -23,7 +23,7 @@
   <ItemGroup>
     <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
     <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
-    <PackageReference Include="Avalonia" Version="12.1.6" ExcludeAssets="analyzers" />
+    <PackageReference Include="Avalonia" Version="12.2.0" ExcludeAssets="analyzers" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.12.0" PrivateAssets="all" />
     <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="5.12.0" PrivateAssets="all" />
   </ItemGroup>
