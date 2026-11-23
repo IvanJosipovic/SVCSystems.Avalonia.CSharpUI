@@ -178,6 +178,52 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
+    public void Source_generated_property_binding_uses_its_registration_field()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace MarkupExtensionGeneratorFixture
+            {
+                // The registration field lives on a base type, so it is not visible in the generated
+                // property's syntax tree. This is the shape produced by Avalonia's property generator.
+                public class GeneratedPropertyControlBase : Control
+                {
+                    public static readonly DirectProperty<GeneratedPropertyControl, bool> FlagProperty =
+                        AvaloniaProperty.RegisterDirect<GeneratedPropertyControl, bool>(nameof(GeneratedPropertyControl.Flag), o => o.Flag, (o, v) => o.Flag = v);
+                }
+
+                public sealed class GeneratedPropertyControl : GeneratedPropertyControlBase, IDeclarativeViewBase
+                {
+                    private bool _flag;
+
+                    [GeneratedDirectProperty]
+                    public bool Flag
+                    {
+                        get => _flag;
+                        set => SetAndRaise(FlagProperty, ref _flag, value);
+                    }
+                }
+
+                public static class Usage
+                {
+                    public static void Use(GeneratedPropertyControl control, object model) => control.Flag(model, x => true);
+                }
+            }
+            """;
+
+        var result = RunFullGenerator(CreateCompilation("GeneratedProperty", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        var generated = Assert.Single(result.GeneratedSources, generated =>
+            generated.Contains("GetCommonPropertyExpressionBindingSetterExtension", StringComparison.Ordinal));
+        Assert.Contains("GeneratedPropertyControl.FlagProperty", generated, StringComparison.Ordinal);
+        Assert.DoesNotContain("_setCompiledBinding(null!", generated, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Referenced_declarative_view_base_control_keeps_all_generated_setters()
     {
         const string librarySource = """
