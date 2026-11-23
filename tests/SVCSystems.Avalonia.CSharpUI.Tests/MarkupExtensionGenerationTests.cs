@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using SVCSystems.Avalonia.CSharpUI;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator;
 using SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators;
+using SVCSystems.Avalonia.CSharpUI.SourceGenerator.InternalGenerators;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using System.Runtime.InteropServices;
@@ -175,6 +176,134 @@ public class MarkupExtensionGenerationTests
         var result = RunFullGenerator(CreateCompilation("DeclarativeViewBase", source));
 
         AssertNoErrors(result.OutputCompilation);
+    }
+
+    [Fact]
+    public void Source_generated_property_binding_uses_its_registration_field()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace MarkupExtensionGeneratorFixture
+            {
+                // The registration field lives on a base type, so it is not visible in the generated
+                // property's syntax tree. This is the shape produced by Avalonia's property generator.
+                public class GeneratedPropertyControlBase : Control
+                {
+                    public static readonly DirectProperty<GeneratedPropertyControl, bool> FlagProperty =
+                        AvaloniaProperty.RegisterDirect<GeneratedPropertyControl, bool>(nameof(GeneratedPropertyControl.Flag), o => o.Flag, (o, v) => o.Flag = v);
+                }
+
+                public sealed class GeneratedPropertyControl : GeneratedPropertyControlBase, IDeclarativeViewBase
+                {
+                    private bool _flag;
+
+                    [GeneratedDirectProperty]
+                    public bool Flag
+                    {
+                        get => _flag;
+                        set => SetAndRaise(FlagProperty, ref _flag, value);
+                    }
+                }
+
+                public static class Usage
+                {
+                    public static void Use(GeneratedPropertyControl control, object model) => control.Flag(model, x => true);
+                }
+            }
+            """;
+
+        var result = RunFullGenerator(CreateCompilation("GeneratedProperty", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        var generated = Assert.Single(result.GeneratedSources, generated =>
+            generated.Contains("GetCommonPropertyExpressionBindingSetterExtension", StringComparison.Ordinal));
+        Assert.Contains("GeneratedPropertyControl.FlagProperty", generated, StringComparison.Ordinal);
+        Assert.DoesNotContain("_setCompiledBinding(null!", generated, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generated_property_attribute_edit_regenerates_binding_on_one_driver()
+    {
+        const string sourceWithoutAttribute = """
+            using Avalonia;
+            using Avalonia.Controls;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace MarkupExtensionGeneratorFixture
+            {
+                // The registration field is inherited, so the generated property has no field in
+                // its own syntax tree. This is the shape produced by Avalonia's property generator.
+                public class GeneratedPropertyControlBase : Control
+                {
+                    public static readonly DirectProperty<GeneratedPropertyControl, bool> FlagProperty =
+                        AvaloniaProperty.RegisterDirect<GeneratedPropertyControl, bool>(nameof(GeneratedPropertyControl.Flag), o => o.Flag, (o, v) => o.Flag = v);
+                }
+
+                public sealed class GeneratedPropertyControl : GeneratedPropertyControlBase, IDeclarativeViewBase
+                {
+                    private bool _flag;
+
+                    public bool Flag
+                    {
+                        get => _flag;
+                        set => SetAndRaise(FlagProperty, ref _flag, value);
+                    }
+                }
+            }
+            """;
+        var sourceWithAttribute = sourceWithoutAttribute.Replace(
+            "public bool Flag",
+            "[GeneratedDirectProperty]" + Environment.NewLine + "        public bool Flag",
+            StringComparison.Ordinal);
+
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var compilation = CreateCompilation("IncrementalGeneratedProperty", sourceWithoutAttribute);
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(
+            [new AvaloniaPropertyExtensionsGenerator().AsSourceGenerator()],
+            parseOptions: parseOptions,
+            driverOptions: new GeneratorDriverOptions(trackIncrementalGeneratorSteps: true));
+
+        driver = driver.RunGenerators(compilation, TestContext.Current.CancellationToken);
+        var initialBinding = GetGeneratedBinding(driver);
+        Assert.Contains("_setCompiledBinding(null!", initialBinding, StringComparison.Ordinal);
+
+        var editedTree = CSharpSyntaxTree.ParseText(
+            sourceWithAttribute,
+            parseOptions,
+            cancellationToken: TestContext.Current.CancellationToken);
+        compilation = compilation.ReplaceSyntaxTree(compilation.SyntaxTrees.Single(), editedTree);
+        driver = driver.RunGenerators(compilation, TestContext.Current.CancellationToken);
+        var secondResult = driver.GetRunResult().Results.Single();
+        var updatedBinding = GetGeneratedBinding(driver);
+
+        Assert.Contains("GeneratedPropertyControl.FlagProperty", updatedBinding, StringComparison.Ordinal);
+        Assert.DoesNotContain("_setCompiledBinding(null!", updatedBinding, StringComparison.Ordinal);
+        // The same driver was reused across a syntax-tree replacement, so the second result came
+        // from the incremental pipeline rather than a fresh generator run.
+        Assert.True(secondResult.TrackedSteps.ContainsKey("SourceOutput"));
+
+        // Removing the attribute must invalidate the cached result in the other direction too.
+        var attributeRemovedTree = CSharpSyntaxTree.ParseText(
+            sourceWithoutAttribute,
+            parseOptions,
+            cancellationToken: TestContext.Current.CancellationToken);
+        compilation = compilation.ReplaceSyntaxTree(compilation.SyntaxTrees.Single(), attributeRemovedTree);
+        driver = driver.RunGenerators(compilation, TestContext.Current.CancellationToken);
+        var revertedBinding = GetGeneratedBinding(driver);
+        Assert.Contains("_setCompiledBinding(null!", revertedBinding, StringComparison.Ordinal);
+        Assert.DoesNotContain("GeneratedPropertyControl.FlagProperty", revertedBinding, StringComparison.Ordinal);
+
+        static string GetGeneratedBinding(GeneratorDriver currentDriver)
+        {
+            var generated = Assert.Single(
+                currentDriver.GetRunResult().Results.Single().GeneratedSources,
+                static source => source.SourceText.ToString().Contains(
+                    "GetCommonPropertyExpressionBindingSetterExtension", StringComparison.Ordinal));
+            return generated.SourceText.ToString();
+        }
     }
 
     [Fact]
