@@ -339,6 +339,9 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
         AppendSyntaxFingerprint(signature, property.Modifiers);
         AppendSyntaxFingerprint(signature, property.Type);
         AppendSignaturePart(signature, property.Identifier.ValueText);
+        // The generated binding expression depends on this classification, which is not part of
+        // the modifier/accessor syntax fingerprints (attributes live on their own syntax nodes).
+        AppendSignaturePart(signature, IsAvaloniaGeneratedProperty(property, semanticModel) ? "avalonia-generated" : "plain");
 
         if (property.AccessorList is { } accessorList)
         {
