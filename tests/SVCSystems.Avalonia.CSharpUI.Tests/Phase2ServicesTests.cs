@@ -58,14 +58,29 @@ public sealed class Phase2ServicesTests : AvaloniaTestBase
         Assert.Equal("Save", button.Content);
         Assert.Equal("Save the document", ToolTip.GetTip(button));
         Assert.Equal("Save the document", AutomationProperties.GetHelpText(button));
-        Assert.False(button.IsEnabled);
+        Assert.False(((DescriptorCommand)button.Command!).CanExecute(null));
 
         var withoutDescription = descriptor with { Description = null, CanExecute = true };
         button.Command(withoutDescription);
 
         Assert.Null(ToolTip.GetTip(button));
         Assert.Null(AutomationProperties.GetHelpText(button));
-        Assert.True(button.IsEnabled);
+        Assert.True(((DescriptorCommand)button.Command!).CanExecute(null));
+    }
+
+    [Fact]
+    public void CommandDescriptorDoesNotOverrideExplicitEnablement()
+    {
+        var descriptor = new CommandDescriptor { Label = "Save", Execute = () => { } };
+
+        var button = new Button { IsEnabled = false };
+        var menuItem = new MenuItem { IsEnabled = false };
+
+        button.Command(descriptor);
+        menuItem.MenuCommand(descriptor);
+
+        Assert.False(button.IsEnabled);
+        Assert.False(menuItem.IsEnabled);
     }
 
     [Fact]
@@ -78,6 +93,40 @@ public sealed class Phase2ServicesTests : AvaloniaTestBase
         descriptor.ToICommand().Execute(null);
 
         Assert.Equal(1, executions);
+    }
+
+    [Fact]
+    public void DescriptorCommandForwardsParameterAndCanExecuteChangedThenDetaches()
+    {
+        var inner = new TrackingCommand { CanExecuteResult = false };
+        var adapter = CommandDescriptor.FromICommand(inner, "Save").ToICommand();
+        var parameter = new object();
+
+        Assert.False(adapter.CanExecute(parameter));
+        Assert.Same(parameter, inner.LastCanExecuteParameter);
+
+        var raises = 0;
+        EventHandler handler = (_, _) => raises++;
+        adapter.CanExecuteChanged += handler;
+        Assert.Equal(1, inner.SubscriberCount);
+
+        inner.RaiseCanExecuteChanged();
+        Assert.Equal(1, raises);
+
+        adapter.CanExecuteChanged -= handler;
+        Assert.Equal(0, inner.SubscriberCount);
+        inner.RaiseCanExecuteChanged();
+        Assert.Equal(1, raises);
+
+        inner.CanExecuteResult = true;
+        Assert.True(adapter.CanExecute(parameter));
+        Assert.Same(parameter, inner.LastCanExecuteParameter);
+
+        var gated = new CommandDescriptor { Label = "Save", Command = inner, CanExecute = false };
+        Assert.False(gated.ToICommand().CanExecute(parameter));
+
+        var executing = new CommandDescriptor { Label = "Save", Command = inner, IsExecuting = true };
+        Assert.False(executing.ToICommand().CanExecute(parameter));
     }
 
     [Fact]
@@ -100,6 +149,68 @@ public sealed class Phase2ServicesTests : AvaloniaTestBase
         Assert.DoesNotContain(
             A11yScanner.Scan(root),
             diagnostic => diagnostic.Id == "SVCUI_A11Y_001");
+    }
+
+    [Fact]
+    public void A11yReportNeverExportsTextBoxText()
+    {
+        const string secret = "CorrectHorseBatteryStaple";
+        var root = new StackPanel();
+        root.Children.Add(new TextBox { Text = secret, PlaceholderText = "Password" });
+
+        var diagnostics = A11yScanner.Scan(root);
+
+        var finding = Assert.Single(diagnostics, diagnostic => diagnostic.Id == "SVCUI_A11Y_003");
+        Assert.Null(finding.ChildText);
+        Assert.Equal("Password", finding.PlaceholderText);
+        Assert.DoesNotContain(secret, A11yReport.ToJson(diagnostics), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A11yScannerUsesLabeledByAndTextBlockContentAsNames()
+    {
+        var root = new StackPanel();
+        var label = new TextBlock { Text = "Email" };
+        var field = new TextBox();
+        AutomationProperties.SetLabeledBy(field, label);
+        var button = new Button { Content = new TextBlock { Text = "Send" } };
+        root.Children.Add(label);
+        root.Children.Add(field);
+        root.Children.Add(button);
+
+        var diagnostics = A11yScanner.Scan(root);
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "SVCUI_A11Y_003");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "SVCUI_A11Y_001");
+    }
+
+    [Fact]
+    public void A11yScannerSkipsDecorativeImagesButReportsUnnamedOnes()
+    {
+        var root = new StackPanel();
+        var decorative = new Image();
+        AutomationProperties.SetAccessibilityView(decorative, AccessibilityView.Raw);
+        var visible = new Image { Name = "logo" };
+        root.Children.Add(decorative);
+        root.Children.Add(visible);
+
+        var finding = Assert.Single(A11yScanner.Scan(root),
+            diagnostic => diagnostic.Id == "SVCUI_A11Y_002");
+
+        Assert.Equal("logo", finding.AutomationId);
+    }
+
+    [Fact]
+    public void A11yScannerPrefersConfiguredAutomationIdOverControlName()
+    {
+        var root = new StackPanel();
+        var image = new Image { Name = "xamlName" };
+        AutomationProperties.SetAutomationId(image, "configured-id");
+        root.Children.Add(image);
+
+        var finding = Assert.Single(A11yScanner.Scan(root));
+
+        Assert.Equal("configured-id", finding.AutomationId);
     }
 
     [Fact]
@@ -159,6 +270,22 @@ public sealed class Phase2ServicesTests : AvaloniaTestBase
         Assert.Single(target);
     }
 
+    [Fact]
+    public void KeyedBridgeCollapsesDuplicateKeysAlreadyInTarget()
+    {
+        var first = new Row("a");
+        var duplicate = new Row("a");
+        var other = new Row("b");
+        var target = new ObservableCollection<Row> { first, duplicate, other };
+        var bridge = new KeyedCollectionBridge<Row>(target, row => row.Key);
+
+        bridge.Apply([other, new Row("a")]);
+
+        Assert.Equal(2, target.Count);
+        Assert.Same(other, target[0]);
+        Assert.Same(first, target[1]);
+    }
+
     private sealed record Row(string Key);
 
     private sealed class DelegateCommand(Action execute) : ICommand
@@ -168,6 +295,29 @@ public sealed class Phase2ServicesTests : AvaloniaTestBase
         public bool CanExecute(object? parameter) => true;
 
         public void Execute(object? parameter) => execute();
+
+        public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private sealed class TrackingCommand : ICommand
+    {
+        public event EventHandler? CanExecuteChanged;
+
+        public bool CanExecuteResult { get; set; } = true;
+
+        public object? LastCanExecuteParameter { get; private set; }
+
+        public int SubscriberCount => CanExecuteChanged?.GetInvocationList().Length ?? 0;
+
+        public bool CanExecute(object? parameter)
+        {
+            LastCanExecuteParameter = parameter;
+            return CanExecuteResult;
+        }
+
+        public void Execute(object? parameter)
+        {
+        }
 
         public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
     }

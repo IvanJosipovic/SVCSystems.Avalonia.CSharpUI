@@ -20,6 +20,8 @@ public sealed class EventSubscriptionInBuildMethodAnalyzer : DiagnosticAnalyzer
 
     private const string BuildMethodName = "Build";
     private const string ViewBaseTypeName = "ViewBase";
+    private const string ViewBaseNamespace = "SVCSystems.Avalonia.CSharpUI";
+    private const string ViewBaseMetadataName = ViewBaseNamespace + "." + ViewBaseTypeName;
 
     private static readonly DiagnosticDescriptor Rule = new(
         DiagnosticId,
@@ -38,10 +40,18 @@ public sealed class EventSubscriptionInBuildMethodAnalyzer : DiagnosticAnalyzer
     {
         context.EnableConcurrentExecution();
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
-        context.RegisterSyntaxNodeAction(AnalyzeAddAssignment, SyntaxKind.AddAssignmentExpression);
+        context.RegisterCompilationStartAction(startContext =>
+        {
+            // Identity is authoritative when the real ViewBase can be resolved; a plain name
+            // comparison would flag unrelated types that happen to be named ViewBase.
+            var viewBase = startContext.Compilation.GetTypeByMetadataName(ViewBaseMetadataName);
+            startContext.RegisterSyntaxNodeAction(
+                context => AnalyzeAddAssignment(context, viewBase),
+                SyntaxKind.AddAssignmentExpression);
+        });
     }
 
-    private static void AnalyzeAddAssignment(SyntaxNodeAnalysisContext context)
+    private static void AnalyzeAddAssignment(SyntaxNodeAnalysisContext context, INamedTypeSymbol? viewBase)
     {
         // Cheap syntactic gate first: only `Event += ...` or `x.Event += ...` shaped assignments
         // are candidates. Both an identifier and a member access can bind to an event symbol.
@@ -68,7 +78,7 @@ public sealed class EventSubscriptionInBuildMethodAnalyzer : DiagnosticAnalyzer
         if (method.Parent is not TypeDeclarationSyntax typeDeclaration ||
             semanticModel.GetDeclaredSymbol(typeDeclaration, context.CancellationToken)
                 is not INamedTypeSymbol containingType ||
-            !DerivesFromViewBase(containingType))
+            !DerivesFromViewBase(containingType, viewBase))
         {
             return;
         }
@@ -92,12 +102,25 @@ public sealed class EventSubscriptionInBuildMethodAnalyzer : DiagnosticAnalyzer
         return null;
     }
 
-    private static bool DerivesFromViewBase(INamedTypeSymbol type)
+    private static bool DerivesFromViewBase(INamedTypeSymbol type, INamedTypeSymbol? viewBase)
     {
         for (var current = type.BaseType; current is not null; current = current.BaseType)
         {
-            if (string.Equals(current.Name, ViewBaseTypeName, StringComparison.Ordinal))
+            if (viewBase is not null)
             {
+                if (SymbolEqualityComparer.Default.Equals(current, viewBase))
+                {
+                    return true;
+                }
+            }
+            else if (string.Equals(current.Name, ViewBaseTypeName, StringComparison.Ordinal) &&
+                     string.Equals(
+                         current.ContainingNamespace?.ToDisplayString(),
+                         ViewBaseNamespace,
+                         StringComparison.Ordinal))
+            {
+                // GetTypeByMetadataName is ambiguous when several assemblies define the same
+                // fully qualified name; namespace plus name is the best available fallback.
                 return true;
             }
         }

@@ -1,5 +1,6 @@
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.LogicalTree;
 using Avalonia.VisualTree;
 
 namespace SVCSystems.Avalonia.CSharpUI.Accessibility;
@@ -7,7 +8,7 @@ namespace SVCSystems.Avalonia.CSharpUI.Accessibility;
 /// <summary>
 /// Scans a live Avalonia control tree for common accessibility defects. The scanner deliberately
 /// does not invent names: it reports surrounding context so a developer or agent can choose a
-/// meaningful one.
+/// meaningful one. User-entered text (notably passwords) is never exported as diagnostic context.
 /// </summary>
 public static class A11yScanner
 {
@@ -29,32 +30,33 @@ public static class A11yScanner
     {
         switch (control)
         {
-            case Button button when !HasName(button) && !HasTextContent(button.Content):
+            case Button button when !HasName(button):
                 diagnostics.Add(Create(
                     "SVCUI_A11Y_001",
                     "An icon-only button has no accessible name",
                     "4.1.2 Name, Role, Value",
                     button,
                     ".Name(\"...\")",
-                    parentName,
-                    nearestHeading,
-                    siblingText,
-                    null,
-                    null));
+                    parentName: parentName,
+                    nearestHeading: nearestHeading,
+                    placeholder: null,
+                    siblingText: siblingText,
+                    childText: null));
                 break;
 
-            case Image image when !HasName(image):
+            case Image image when !HasName(image) &&
+                AutomationProperties.GetAccessibilityView(image) != AccessibilityView.Raw:
                 diagnostics.Add(Create(
                     "SVCUI_A11Y_002",
                     "An image has no alternative text and is not marked decorative",
                     "1.1.1 Non-text Content",
                     image,
                     ".Name(\"...\")",
-                    parentName,
-                    nearestHeading,
-                    siblingText,
-                    null,
-                    null));
+                    parentName: parentName,
+                    nearestHeading: nearestHeading,
+                    placeholder: null,
+                    siblingText: siblingText,
+                    childText: null));
                 break;
 
             case TextBox textBox when !HasName(textBox):
@@ -64,15 +66,16 @@ public static class A11yScanner
                     "3.3.2 Labels or Instructions",
                     textBox,
                     ".Name(\"...\")",
-                    parentName,
-                    nearestHeading,
-                    siblingText ?? textBox.PlaceholderText,
-                    null,
-                    textBox.Text));
+                    parentName: parentName,
+                    nearestHeading: nearestHeading,
+                    placeholder: textBox.PlaceholderText,
+                    siblingText: siblingText,
+                    childText: null));
                 break;
         }
 
-        var nameForChildren = HasName(control) ? GetName(control) : parentName;
+        var effectiveName = GetEffectiveName(control);
+        var nameForChildren = !string.IsNullOrWhiteSpace(effectiveName) ? effectiveName : parentName;
         var headingForChildren = control is TextBlock text && !string.IsNullOrWhiteSpace(text.Text)
             ? text.Text
             : nearestHeading;
@@ -108,7 +111,7 @@ public static class A11yScanner
         Message = message,
         WcagCriterion = criterion,
         ElementType = control.GetType().Name,
-        AutomationId = control.Name,
+        AutomationId = AutomationProperties.GetAutomationId(control) ?? control.Name,
         SuggestedModifier = modifier,
         SuggestedValue = "<<describe this control>>",
         CodeSnippet = "AutomationProperties.SetName(control, \"<<describe this control>>\");",
@@ -119,10 +122,78 @@ public static class A11yScanner
         PlaceholderText = placeholder
     };
 
-    private static bool HasName(Control control) => !string.IsNullOrWhiteSpace(GetName(control));
+    private static bool HasName(Control control) => !string.IsNullOrWhiteSpace(GetEffectiveName(control));
 
-    private static string? GetName(Control control) => AutomationProperties.GetName(control);
+    /// <summary>
+    /// Resolves the name a control presents to assistive technology: an explicit automation name,
+    /// a name supplied by <see cref="AutomationProperties.LabeledByProperty"/>, or a visible label
+    /// held as content (commonly a <see cref="TextBlock"/> inside a button or label).
+    /// TextBox.Text is deliberately never consulted.
+    /// </summary>
+    private static string? GetEffectiveName(Control control)
+    {
+        var explicitName = AutomationProperties.GetName(control);
+        if (!string.IsNullOrWhiteSpace(explicitName))
+        {
+            return explicitName;
+        }
 
-    private static bool HasTextContent(object? content) =>
-        content is string text && !string.IsNullOrWhiteSpace(text);
+        var labeledBy = AutomationProperties.GetLabeledBy(control);
+        if (labeledBy is not null)
+        {
+            var labelName = GetNameFromContent(labeledBy);
+            if (!string.IsNullOrWhiteSpace(labelName))
+            {
+                return labelName;
+            }
+        }
+
+        return control is ContentControl contentControl
+            ? GetNameFromContent(contentControl.Content)
+            : null;
+    }
+
+    private static string? GetNameFromContent(object? content, int depth = 0)
+    {
+        if (depth > 4)
+        {
+            return null;
+        }
+
+        switch (content)
+        {
+            case string text:
+                return text;
+            case TextBlock textBlock:
+                return textBlock.Text;
+            case ContentControl contentControl:
+                return FirstNonEmpty(
+                    AutomationProperties.GetName(contentControl),
+                    GetNameFromContent(contentControl.Content, depth + 1));
+            case Control child when child is not TextBox:
+            {
+                var explicitName = AutomationProperties.GetName(child);
+                if (!string.IsNullOrWhiteSpace(explicitName))
+                {
+                    return explicitName;
+                }
+
+                foreach (var logicalChild in child.GetLogicalChildren().OfType<Control>())
+                {
+                    var childName = GetNameFromContent(logicalChild, depth + 1);
+                    if (!string.IsNullOrWhiteSpace(childName))
+                    {
+                        return childName;
+                    }
+                }
+
+                return null;
+            }
+            default:
+                return null;
+        }
+    }
+
+    private static string? FirstNonEmpty(string? first, string? second) =>
+        !string.IsNullOrWhiteSpace(first) ? first : second;
 }

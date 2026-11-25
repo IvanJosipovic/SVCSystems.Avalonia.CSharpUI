@@ -18,6 +18,30 @@ public sealed class MistypedGeneratedFactoryNameAnalyzerTests
         }
         """;
 
+    // Mirrors the emitted factory signature: caller-info parameters that are all optional.
+    private const string GeneratedShapeFactoriesSource = """
+        #nullable enable
+        namespace SVCSystems.Avalonia.CSharpUI
+        {
+            internal static class GeneratedControlFactories
+            {
+                public static object Button(
+                    [global::System.Runtime.CompilerServices.CallerFilePath] string? sourceFile = null,
+                    [global::System.Runtime.CompilerServices.CallerLineNumber] int sourceLine = 0) => new object();
+            }
+        }
+        """;
+
+    private const string RequiredArgumentFactoriesSource = """
+        namespace SVCSystems.Avalonia.CSharpUI
+        {
+            internal static class GeneratedControlFactories
+            {
+                public static object Button(string caption) => new object();
+            }
+        }
+        """;
+
     [Fact]
     public void RuleIsAWarningInTheExpectedCategory()
     {
@@ -45,6 +69,52 @@ public sealed class MistypedGeneratedFactoryNameAnalyzerTests
             new DiagnosticResult(MistypedGeneratedFactoryNameAnalyzer.DiagnosticId, DiagnosticSeverity.Warning)
                 .WithLocation(0)
                 .WithMessage("'Buton' is not a known name; did you mean the generated control factory 'Button'?"));
+
+        await test.RunAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task ReportsNearMatchForGeneratedOptionalCallerInfoParametersAsync()
+    {
+        var test = new CSharpAnalyzerTest<MistypedGeneratedFactoryNameAnalyzer, DefaultVerifier>
+        {
+            CompilerDiagnostics = CompilerDiagnostics.None,
+        };
+        test.TestState.Sources.Add(GeneratedShapeFactoriesSource);
+        test.TestState.Sources.Add("""
+            namespace App
+            {
+                public class Usage
+                {
+                    public object M() => {|#0:Buton|}();
+                }
+            }
+            """);
+        test.ExpectedDiagnostics.Add(
+            new DiagnosticResult(MistypedGeneratedFactoryNameAnalyzer.DiagnosticId, DiagnosticSeverity.Warning)
+                .WithLocation(0)
+                .WithMessage("'Buton' is not a known name; did you mean the generated control factory 'Button'?"));
+
+        await test.RunAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task DoesNotReportFactoryRequiringArgumentsAsync()
+    {
+        var test = new CSharpAnalyzerTest<MistypedGeneratedFactoryNameAnalyzer, DefaultVerifier>
+        {
+            CompilerDiagnostics = CompilerDiagnostics.None,
+        };
+        test.TestState.Sources.Add(RequiredArgumentFactoriesSource);
+        test.TestState.Sources.Add("""
+            namespace App
+            {
+                public class Usage
+                {
+                    public object M() => Buton();
+                }
+            }
+            """);
 
         await test.RunAsync(TestContext.Current.CancellationToken);
     }
@@ -146,6 +216,41 @@ public sealed class MistypedGeneratedFactoryNameAnalyzerTests
             """);
 
         test.FixedState.Sources.Add(FactoriesSource);
+        test.FixedState.Sources.Add("""
+            namespace App
+            {
+                public class Usage
+                {
+                    public object M() => SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories.Button();
+                }
+            }
+            """);
+
+        await test.RunAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task CodeFixProducesBindingCallForGeneratedOptionalParametersAsync()
+    {
+        var test = new CSharpCodeFixTest<
+            MistypedGeneratedFactoryNameAnalyzer,
+            QualifyGeneratedFactoryNameCodeFixProvider,
+            DefaultVerifier>
+        {
+            CompilerDiagnostics = CompilerDiagnostics.None,
+        };
+        test.TestState.Sources.Add(GeneratedShapeFactoriesSource);
+        test.TestState.Sources.Add("""
+            namespace App
+            {
+                public class Usage
+                {
+                    public object M() => {|SVCUI002:Buton|}();
+                }
+            }
+            """);
+
+        test.FixedState.Sources.Add(GeneratedShapeFactoriesSource);
         test.FixedState.Sources.Add("""
             namespace App
             {

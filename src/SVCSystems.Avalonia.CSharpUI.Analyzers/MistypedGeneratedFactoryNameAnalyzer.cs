@@ -76,8 +76,10 @@ public sealed class MistypedGeneratedFactoryNameAnalyzer : DiagnosticAnalyzer
             var factoryType = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
             foreach (var member in type.GetMembers())
             {
+                // Generated factories carry optional caller-info parameters so a bare call still
+                // compiles; only require that no argument is mandatory.
                 if (member is not IMethodSymbol { IsStatic: true, IsImplicitlyDeclared: false } method ||
-                    method.Parameters.Length != 0 ||
+                    !method.Parameters.All(static parameter => parameter.IsOptional) ||
                     !method.Name.All(char.IsLetterOrDigit) ||
                     !seen.Add(method.Name))
                 {

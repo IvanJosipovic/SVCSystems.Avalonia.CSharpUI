@@ -13,7 +13,7 @@ Implementation notes: the curated common-control list is a `typeof(...)` assembl
 | Legacy "generate everything" mode | **Removed.** No `[assembly: GenerateMarkupExtensionsForAvalonia]` / `[assembly: GenerateMarkupExtensionsForAssembly]` full-scan escape hatch. |
 | Scope of trimming | **Everything**: fluent extensions, `GeneratedControlFactories`, and `ViewFactoryRegistry` registrations are generated only for the used set (plus the required base-type closure). |
 | Common controls | A curated allowlist of frequently used Avalonia controls is **always** generated, declared with `typeof(...)` in the runtime library and read by the generator from metadata. This is not the removed full-scan mode. |
-| Factory syntax | Bare `Button()` requires a consumer-authored import: a per-file `using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;`, a project-level `<Using Static="..." />` item, or an opt-in `[assembly: GenerateGlobalControlFactories]` that asks the generator to emit a global static import. The generator never emits type aliases. |
+| Factory syntax | Bare `Button()` requires a consumer-authored import: a per-file `using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;`, a project-level `<Using Include="SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories" Static="true" />` item, or an opt-in `[assembly: GenerateGlobalControlFactories]` that asks the generator to emit a global static import. The generator never emits type aliases. |
 
 Non-goals: changing extension method bodies, the Avalonia property system integration, compiled bindings, source metadata, XAML resource factories, or the declarative-view generators. Those are driven by declarative views and view classes, not by the whole control universe.
 
@@ -94,7 +94,7 @@ The generator **does not inject a global static import by default**. Bare factor
 using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;
 ```
 
-or, project-wide, `<Using Static="SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories" />` in the project file. A project that deliberately wants the import generated can apply `[assembly: GenerateGlobalControlFactories]`; the generator then emits one file containing `global using static ...GeneratedControlFactories;`.
+or, project-wide, `<Using Include="SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories" Static="true" />` in the project file. A project that deliberately wants the import generated can apply `[assembly: GenerateGlobalControlFactories]`; the generator then emits one file containing `global using static ...GeneratedControlFactories;`.
 
 No generated type aliases exist. A static import shadows same-named types in member-access positions (`Path.Combine`, `Canvas.Left`), so callers who opt in must qualify such types (`global::System.IO.Path.Combine`) or use the per-file import instead. The `SVCUI001` analyzer reports shadowed identifier usages and offers a code fix that emits a globally qualified name with a `Simplifier` annotation. This design keeps every name visible in consumer source so formatters and IDEs resolve the same compilation the compiler does.
 

@@ -41,17 +41,17 @@ internal readonly struct GenerationDiagnostic : IEquatable<GenerationDiagnostic>
 {
     private readonly int _hash;
 
-    internal GenerationDiagnostic(string id, string message, DiagnosticSeverity severity, Location? location = null)
+    internal GenerationDiagnostic(string id, string message, DiagnosticSeverity severity, string? locationMarker = null)
     {
         Id = id;
         Message = message;
         Severity = severity;
-        Location = location;
+        LocationMarker = locationMarker;
         unchecked
         {
             var hash = (id?.GetHashCode() ?? 0) * 397 ^ (message?.GetHashCode() ?? 0);
             hash = (hash * 397) ^ (int)severity;
-            _hash = (hash * 397) ^ (location?.ToString()?.GetHashCode() ?? 0);
+            _hash = (hash * 397) ^ (locationMarker?.GetHashCode() ?? 0);
         }
     }
 
@@ -61,13 +61,18 @@ internal readonly struct GenerationDiagnostic : IEquatable<GenerationDiagnostic>
 
     internal DiagnosticSeverity Severity { get; }
 
-    internal Location? Location { get; }
+    /// <summary>
+    /// A declaration id, not a <see cref="Location"/>: cached results may be reported by a later
+    /// compilation whose syntax trees are different objects. The current tree is found at report
+    /// time from this id.
+    /// </summary>
+    internal string? LocationMarker { get; }
 
     public bool Equals(GenerationDiagnostic other) =>
         string.Equals(Id, other.Id, StringComparison.Ordinal) &&
         string.Equals(Message, other.Message, StringComparison.Ordinal) &&
         Severity == other.Severity &&
-        string.Equals(Location?.ToString(), other.Location?.ToString(), StringComparison.Ordinal);
+        string.Equals(LocationMarker, other.LocationMarker, StringComparison.Ordinal);
 
     public override bool Equals(object? obj) => obj is GenerationDiagnostic other && Equals(other);
 
@@ -190,9 +195,9 @@ public sealed class UsageDrivenMarkupGenerator
         var names = UsageNameProvider.Create(context).Collect();
         var input = names.Combine(context.CompilationProvider);
 
-        // Produce an equatable result first. Registering the output on that result (instead of on
-        // the compilation) lets Roslyn cache it when an unrelated edit leaves generated text and
-        // diagnostics unchanged, instead of re-adding every file on each keystroke.
+        // Produce an equatable result first. Registering the source output on that result (instead
+        // of on the compilation) lets Roslyn cache it when an unrelated edit leaves generated text
+        // unchanged, instead of re-adding every file on each keystroke.
         var generation = input
             .Select(static (pair, cancellationToken) => Generate(pair.Left, pair.Right, cancellationToken))
             .WithComparer(GenerationResultComparer.Instance)
@@ -204,21 +209,52 @@ public sealed class UsageDrivenMarkupGenerator
             {
                 sourceContext.AddSource(source.HintName, SourceText.From(source.Text, Encoding.UTF8));
             }
-
-            foreach (var diagnostic in result.Diagnostics)
-            {
-                var descriptor = Descriptors.GetOrAdd(
-                    diagnostic.Id + "\0" + diagnostic.Message,
-                    _ => new DiagnosticDescriptor(
-                        diagnostic.Id,
-                        diagnostic.Id,
-                        diagnostic.Message,
-                        "SVCSystems.Avalonia.CSharpUI",
-                        diagnostic.Severity,
-                        isEnabledByDefault: true));
-                sourceContext.ReportDiagnostic(Diagnostic.Create(descriptor, diagnostic.Location ?? Location.None));
-            }
         });
+
+        // Diagnostics need the current compilation: a cached result may come from an earlier
+        // compilation and can only be re-anchored to a syntax tree that belongs to this one.
+        context.RegisterSourceOutput(
+            generation.Combine(context.CompilationProvider),
+            static (sourceContext, pair) =>
+            {
+                foreach (var diagnostic in pair.Left.Diagnostics)
+                {
+                    var descriptor = Descriptors.GetOrAdd(
+                        diagnostic.Id + "\0" + diagnostic.Message,
+                        _ => new DiagnosticDescriptor(
+                            diagnostic.Id,
+                            diagnostic.Id,
+                            diagnostic.Message,
+                            "SVCSystems.Avalonia.CSharpUI",
+                            diagnostic.Severity,
+                            isEnabledByDefault: true));
+                    sourceContext.ReportDiagnostic(Diagnostic.Create(
+                        descriptor,
+                        ResolveDiagnosticLocation(diagnostic.LocationMarker, pair.Right)));
+                }
+            });
+    }
+
+    private static Location ResolveDiagnosticLocation(string? locationMarker, Compilation compilation)
+    {
+        if (locationMarker is null)
+        {
+            return Location.None;
+        }
+
+        var symbol = DocumentationCommentId.GetFirstSymbolForDeclarationId(locationMarker, compilation);
+        if (symbol is not null)
+        {
+            foreach (var location in symbol.Locations)
+            {
+                if (location.IsInSource)
+                {
+                    return location;
+                }
+            }
+        }
+
+        return Location.None;
     }
 
     private static GenerationResult Generate(
@@ -346,14 +382,19 @@ public sealed class UsageDrivenMarkupGenerator
                          StringComparer.Ordinal)
                      .Where(static group => group.Count() > 1))
         {
-            var location = group
-                .SelectMany(static model => model.Type.Locations)
-                .FirstOrDefault(static location => location.IsInSource);
+            // Keep a stable declaration id rather than a Location: the cached result can be
+            // reported by another compilation whose syntax trees are different objects.
+            var declaration = group
+                .Select(static model => model.Type)
+                .FirstOrDefault(static type => type.Locations.Any(static location => location.IsInSource));
+            var locationMarker = declaration is null
+                ? null
+                : DocumentationCommentId.CreateDeclarationId(declaration);
             diagnostics.Add(new GenerationDiagnostic(
                 "SVCUIGEN009",
                 string.Format(CollidingFactoryName.MessageFormat.ToString(), group.Key, group.Count()),
                 DiagnosticSeverity.Warning,
-                location));
+                locationMarker));
         }
 
         var host = SharedHost;

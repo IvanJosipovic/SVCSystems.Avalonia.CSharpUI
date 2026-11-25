@@ -7,7 +7,7 @@ The test suite is split into explicit tiers so a change can be verified at the c
 | 1. Generator and analyzer unit tests | `tests/SVCSystems.Avalonia.CSharpUI.Tests` | Emitted source shape, usage resolution, diagnostics, incremental caching, aliases/imports, XAML resource generation | `dotnet test tests/SVCSystems.Avalonia.CSharpUI.Tests` |
 | 2. Analyzer tests | `tests/SVCSystems.Avalonia.CSharpUI.Analyzers.Tests` | `SVCUI001` positive/negative/near-miss cases and the `global::` code-fix round trip | `dotnet test tests/SVCSystems.Avalonia.CSharpUI.Analyzers.Tests` |
 | 3. Live Avalonia control tests | same as tier 1 (`AvaloniaFact`) | Real property setters, compiled/reflection bindings, templates, styles, commands, reload, build diagnostics | `dotnet test tests/SVCSystems.Avalonia.CSharpUI.Tests` |
-| 4. Build integration | `SVCSystems.Avalonia.CSharpUI.slnx` | The generator and analyzer load as analyzers in a real compiler, the three samples compile, and the NuGet package contains both analyzer DLLs | `dotnet build SVCSystems.Avalonia.CSharpUI.slnx` |
+| 4. Build integration | `SVCSystems.Avalonia.CSharpUI.slnx` | The generator and analyzer load as analyzers in a real compiler and the three samples compile | `dotnet build SVCSystems.Avalonia.CSharpUI.slnx` |
 
 ## When to write which test
 
@@ -23,7 +23,7 @@ The test suite is split into explicit tiers so a change can be verified at the c
 - Cache correctness is covered by `Comment_only_edit_keeps_generated_sources_stable_on_one_driver` and `Generated_files_disappear_when_usage_is_removed`; the opt-in attribute is preserved across the edit so the test exercises the real pipeline.
 - Samples are compiled by tier 4. They currently require `[assembly: GenerateGlobalControlFactories]` for bare factories; a sample-backed in-memory compilation tier is future work.
 - Benchmarks are in `benchmarks/SVCSystems.Avalonia.CSharpUI.SourceGenerator.Benchmarks`; see `docs/performance-review.md`. Benchmark artifacts are intentionally not checked in, so regenerate them before comparing numbers.
-- The analyzer suite is run against the samples on every PR with `dotnet build ... -warnaserror:SVCUI001,SVCUI002,SVCUI003`. A rule that produces zero findings in the samples is either over-fit to its unit tests or gated too narrowly.
+- The analyzer suite is run against the samples on every PR with `dotnet build ... -warnaserror:SVCUI001,SVCUI002,SVCUI003`. Rule detection is validated by positive analyzer unit tests (tier 2); the sample build gate proves the rules produce no false positives on real code. Clean samples can correctly yield zero findings.
 
 ## Checks that actually prove something
 

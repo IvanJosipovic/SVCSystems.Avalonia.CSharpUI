@@ -23,7 +23,9 @@ public class Style<TControl> : Style, IRelativeStyle
     }
 
     /// <summary>
-    /// Creates a style with the supplied selector function.
+    /// Creates a style with the supplied selector function. This is the original public
+    /// constructor; its signature is preserved for binary compatibility and it uses automatic
+    /// traversal detection.
     /// </summary>
     /// <param name="selectorFunc">
     /// A selector builder. Avalonia's <c>Selectors.*</c> extension methods accept a <c>null</c>
@@ -31,10 +33,24 @@ public class Style<TControl> : Style, IRelativeStyle
     /// </param>
     /// <param name="expression">The caller's selector expression, used as a heuristic fallback.</param>
     /// <param name="callerFile">Caller file path supplied by the compiler.</param>
+    public Style(
+            Func<Selector, Selector> selectorFunc,
+            [CallerArgumentExpression(nameof(selectorFunc))] string? expression = null,
+            [CallerFilePath] string? callerFile = null)
+        : this(selectorFunc, expression, callerFile, null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a style with the supplied selector function and an explicit traversal classification.
+    /// </summary>
+    /// <param name="selectorFunc">The selector builder.</param>
+    /// <param name="expression">The caller's selector expression, used as a heuristic fallback.</param>
+    /// <param name="callerFile">Caller file path supplied by the compiler.</param>
     /// <param name="treatAsTraversal">
     /// Overrides the traversal heuristic. <c>true</c> preserves the selector as-is (no
     /// <c>.OfType&lt;TControl&gt;()</c> is added), <c>false</c> treats it as a simple selector and
-    /// binds it to <typeparamref name="TControl"/>. <c>null</c> (the default) auto-detects.
+    /// binds it to <typeparamref name="TControl"/>. <c>null</c> auto-detects.
     /// </param>
     /// <remarks>
     /// By default the constructor decides whether <paramref name="selectorFunc"/> already carries a
@@ -50,9 +66,9 @@ public class Style<TControl> : Style, IRelativeStyle
     /// </remarks>
     public Style(
             Func<Selector, Selector> selectorFunc,
-            [CallerArgumentExpression(nameof(selectorFunc))] string? expression = null,
-            [CallerFilePath] string? callerFile = null,
-            bool? treatAsTraversal = null)
+            string? expression,
+            string? callerFile,
+            bool? treatAsTraversal)
     {
         ArgumentNullException.ThrowIfNull(selectorFunc);
 

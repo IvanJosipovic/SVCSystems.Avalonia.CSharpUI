@@ -139,6 +139,48 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
+    public void EventHandler_events_use_two_parameter_subscription_with_one_argument_callback()
+    {
+        const string source = """
+            using System;
+            using SVCSystems.Avalonia.CSharpUI;
+
+            namespace EventHandlerFixture
+            {
+                public sealed class EventView : ViewBase
+                {
+                    public event EventHandler? Plain;
+                    public event EventHandler<EventArgs>? Typed;
+
+                    protected override object Build() => new global::Avalonia.Controls.TextBlock();
+                }
+            }
+            """;
+
+        var result = RunGenerator(
+            CreateCompilation("EventHandlerExtensions", source),
+            new AvaloniaEventExtensionsGenerator());
+
+        AssertNoErrors(result.OutputCompilation);
+        var generated = Assert.Single(result.GeneratedSources, static generated =>
+            generated.Contains("EventHandlerFixture_EventViewEventExtensions", StringComparison.Ordinal));
+
+        // The public callback stays one-argument, but EventHandler/EventHandler<T> subscriptions
+        // must accept both sender and event data.
+        Assert.Contains(
+            "OnPlain(this EventView control, Action<global::System.EventArgs> action)",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains("control.Plain += (arg0, arg1) => action(arg1);", generated, StringComparison.Ordinal);
+        Assert.Contains(
+            "OnTyped(this EventView control, Action<EventArgs> action)",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains("control.Typed += (arg0, arg1) => action(arg1);", generated, StringComparison.Ordinal);
+        Assert.DoesNotContain("=> action(arg0);", generated, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Declarative_view_base_control_gets_one_set_of_setters()
     {
         const string source = """
@@ -1762,6 +1804,63 @@ public class MarkupExtensionGenerationTests
         Assert.Equal(DiagnosticSeverity.Warning, diagnostic.Severity);
         Assert.NotEqual(Microsoft.CodeAnalysis.Location.None, diagnostic.Location);
         Assert.Contains("Shared", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cached_collision_diagnostic_is_reanchored_to_the_current_compilation_tree()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+
+            namespace One { public sealed class Shared : Control { } }
+            namespace Two { public sealed class Shared : Control { } }
+
+            public static class Usage
+            {
+                public static object Create() => new object();
+            }
+            """;
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var compilation = CreateCompilation("CollisionCacheFirst", source);
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(
+            [new ExternalAssemblyExtensionsGenerator().AsSourceGenerator()],
+            parseOptions: parseOptions);
+
+        driver = driver.RunGenerators(compilation, TestContext.Current.CancellationToken);
+        var firstWarning = Assert.Single(
+            driver.GetRunResult().Diagnostics,
+            static diagnostic => diagnostic.Id == "SVCUIGEN009");
+        Assert.NotEqual(Microsoft.CodeAnalysis.Location.None, firstWarning.Location);
+        Assert.Same(compilation.SyntaxTrees.Single(), firstWarning.Location.SourceTree);
+
+        // A comment-only edit keeps the generation fingerprint (and therefore the cached result)
+        // but replaces the syntax tree. The cached diagnostic must not point at the old tree.
+        var editedTree = CSharpSyntaxTree.ParseText(
+            "// comment-only edit\n" + compilation.SyntaxTrees.Single().GetText(TestContext.Current.CancellationToken).ToString(),
+            parseOptions,
+            cancellationToken: TestContext.Current.CancellationToken);
+        var editedCompilation = compilation.ReplaceSyntaxTree(compilation.SyntaxTrees.Single(), editedTree);
+
+        GeneratorDriver secondDriver = CSharpGeneratorDriver.Create(
+            [new ExternalAssemblyExtensionsGenerator().AsSourceGenerator()],
+            parseOptions: parseOptions);
+        secondDriver = secondDriver.RunGeneratorsAndUpdateCompilation(
+            editedCompilation,
+            out var outputCompilation,
+            out var driverDiagnostics,
+            TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(driverDiagnostics, static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(
+            secondDriver.GetRunResult().Diagnostics,
+            static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        AssertNoErrors((CSharpCompilation)outputCompilation);
+
+        var warning = Assert.Single(
+            secondDriver.GetRunResult().Diagnostics,
+            static diagnostic => diagnostic.Id == "SVCUIGEN009");
+        Assert.Same(editedTree, warning.Location.SourceTree);
     }
 
     private static GeneratorResult RunFullGenerator(CSharpCompilation compilation) =>

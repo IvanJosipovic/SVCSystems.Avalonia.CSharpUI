@@ -163,14 +163,14 @@ That is the practical difference between "learn from Reactor" and "copy Reactor"
 | 2 | Done | `AnalyzerReleases.Unshipped.md` tracks all three IDs. |
 | 3 | Done | New analyzers use syntactic gate → symbol check → report; the fuzzy rule resolves the factory set once per compilation. |
 | 4 | Done | Fix data flows through `Diagnostic.Properties`; the code fix emits `global::`-qualified syntax with `Simplifier.Annotation`; argument-shape-style findings remain message-only by design. |
-| 5 | Done | Silent-drop guard now self-validates that it inspected at least four binding-valued properties. |
+| 5 | Partial | Silent-drop guard checks four hard-coded binding-valued properties and self-validates the lower bound; deriving coverage from the generator's unsupported-type skip rule remains future work. |
 | 6 | Done | Attribute packaging verified by the existing absence guards; no `CS0436` in friend assemblies. |
 | 7 | Partial | Three analyzers exist, but a dedicated validator per generator attribute is still future work. |
 | 8 | Deferred | Requires measuring module-initializer startup and a publish-trim test before changing registration. |
 | 9 | Skip | Interceptors deliberately not adopted; caller-info + `SourceInfo` retained. |
 | 10 | Partial | The "never publish a stale in-flight result" rule is documented in `docs/perf-experiments.md`; generation stamps await a real caching scenario. |
 | 11–12 | Done | `CommandDescriptor` + `DescriptorCommand` bridge to `ICommand`; generated-style `.Command(...)` setters for `Button`/`MenuItem` clear stale tooltip/help/gesture metadata. |
-| 13 | Done | `A11yDiagnostic`, `A11yReport.ToJson` (Utf8JsonWriter, AOT-safe) and `A11yScanner` over the live visual tree. No second inspector was built. |
+| 13 | Partial | `A11yDiagnostic`, `A11yReport.ToJson` (Utf8JsonWriter, AOT-safe) and `A11yScanner` over the live visual tree exist; no second inspector was built. The four accessibility analyzers are not implemented. |
 | 14 | Done | `AsyncValue<T>` with four states and `Match`; generation guards documented for future async services. No query-cache framework was added. |
 | 15 | Done | `KeyedCollectionBridge<T>` applies immutable lists to an `ObservableCollection<T>` by key, preserving instance identity and emitting `Move`. |
 | 16 | Done | `ChangeCoalescer` collapses notification storms into one `Dispatcher.UIThread` pass at background priority. |
@@ -181,6 +181,6 @@ That is the practical difference between "learn from Reactor" and "copy Reactor"
 | 28 | Done | PR workflow adds an `analyzer-gate` job building the solution with `-warnaserror:SVCUI001,SVCUI002,SVCUI003`. |
 | 29–31 | Partial/done | `docs/testing.md` now carries the anti-vacuity rules, mutation-check guidance and diff-ledger policy; TAP fixtures/sharding are not needed for the current suite. |
 | 32–33 | Doc done | `docs/perf-experiments.md` defines interleaved paired-CI comparison, per-phase layers and an explicit "Don'ts" list; per-phase counters remain future work. |
-| 34 | Done | The analyzer-gate job is also a real full-solution build gate covering samples and packaging. |
+| 34 | Partial | The analyzer-gate job builds the full solution and the three samples, but does not pack or inspect package contents. |
 
 **Verification:** `dotnet build SVCSystems.Avalonia.CSharpUI.slnx` clean; `dotnet test` 350/350 passing (net10.0 + net11.0); build with `-warnaserror:SVCUI001,SVCUI002,SVCUI003` clean.

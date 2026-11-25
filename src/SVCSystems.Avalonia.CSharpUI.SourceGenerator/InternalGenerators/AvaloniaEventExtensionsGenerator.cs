@@ -115,12 +115,28 @@ public class AvaloniaEventExtensionsGenerator : IIncrementalGenerator
 
         // Derive the delegate's argument types, then use the shared adapter-shape rule so this
         // generator and ActionToEventGenerator always produce the same Action signature.
-        string[] parameterTypes = eventTypeString.StartsWith("EventHandler", StringComparison.Ordinal)
-            ? typeArguments is { Length: 1 } ? [typeArguments[0]] : ["global::System.EventArgs"]
-            : eventTypeString.StartsWith("Action", StringComparison.Ordinal)
-                ? typeArguments is { Length: 1 } ? [typeArguments[0]] : []
-                : [];
-        var shape = EventAdapterShapes.For(parameterTypes);
+        // EventHandler/EventHandler<T> have the standard (sender, event-data) signature: the public
+        // callback takes only the event data, but the subscribed lambda must accept both arguments.
+        var isEventHandler = eventTypeString.StartsWith("EventHandler", StringComparison.Ordinal);
+        var isAction = eventTypeString.StartsWith("Action", StringComparison.Ordinal);
+        string[] parameterTypes;
+        var hasStandardSignature = false;
+        if (isEventHandler)
+        {
+            var eventArgsType = typeArguments is { Length: 1 } ? typeArguments[0] : "global::System.EventArgs";
+            parameterTypes = ["global::System.Object", eventArgsType];
+            hasStandardSignature = true;
+        }
+        else if (isAction)
+        {
+            parameterTypes = typeArguments is { Length: 1 } ? [typeArguments[0]] : [];
+        }
+        else
+        {
+            parameterTypes = [];
+        }
+
+        var shape = EventAdapterShapes.For(parameterTypes, hasStandardSignature);
         var parameterList = shape.ParameterList;
         var lambdaParameters = shape.LambdaParameters;
         var lambdaBody = shape.ActionCall;

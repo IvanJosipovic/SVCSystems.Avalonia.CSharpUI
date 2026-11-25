@@ -65,12 +65,72 @@ public sealed record CommandDescriptor
 public sealed class DescriptorCommand : ICommand
 {
     private readonly CommandDescriptor _descriptor;
+    private readonly ICommand? _innerCommand;
+    private readonly object _hookLock = new();
+    private EventHandler? _canExecuteChanged;
+    private int _subscriberCount;
+    private bool _isHookedToInner;
 
-    internal DescriptorCommand(CommandDescriptor descriptor) => _descriptor = descriptor;
+    internal DescriptorCommand(CommandDescriptor descriptor)
+    {
+        _descriptor = descriptor;
+        _innerCommand = descriptor.Command;
+    }
 
-    public event EventHandler? CanExecuteChanged;
+    /// <summary>
+    /// Forwards to subscribers and, while there are subscribers, mirrors the wrapped command's
+    /// <c>CanExecuteChanged</c>. The wrapped handler is removed when the last subscriber leaves so
+    /// the adapter does not keep controls alive through the view-model command.
+    /// </summary>
+    public event EventHandler? CanExecuteChanged
+    {
+        add
+        {
+            if (value is null)
+            {
+                return;
+            }
 
-    public bool CanExecute(object? parameter) => _descriptor.IsEnabled;
+            _canExecuteChanged += value;
+            if (_subscriberCount++ == 0 && _innerCommand is not null)
+            {
+                lock (_hookLock)
+                {
+                    if (!_isHookedToInner)
+                    {
+                        _innerCommand.CanExecuteChanged += OnInnerCanExecuteChanged;
+                        _isHookedToInner = true;
+                    }
+                }
+            }
+        }
+        remove
+        {
+            if (value is null || _subscriberCount == 0)
+            {
+                return;
+            }
+
+            if (--_subscriberCount == 0 && _innerCommand is not null)
+            {
+                lock (_hookLock)
+                {
+                    if (_isHookedToInner)
+                    {
+                        _innerCommand.CanExecuteChanged -= OnInnerCanExecuteChanged;
+                        _isHookedToInner = false;
+                    }
+                }
+            }
+
+            _canExecuteChanged -= value;
+        }
+    }
+
+    public bool CanExecute(object? parameter) =>
+        _descriptor.CanExecute &&
+        !_descriptor.IsExecuting &&
+        (_innerCommand?.CanExecute(parameter) ?? true);
 
     public void Execute(object? parameter)
     {
@@ -97,5 +157,7 @@ public sealed class DescriptorCommand : ICommand
         }
     }
 
-    public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+    public void RaiseCanExecuteChanged() => _canExecuteChanged?.Invoke(this, EventArgs.Empty);
+
+    private void OnInnerCanExecuteChanged(object? sender, EventArgs e) => RaiseCanExecuteChanged();
 }

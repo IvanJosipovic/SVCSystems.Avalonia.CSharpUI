@@ -23,8 +23,9 @@ public sealed class KeyedCollectionBridge<T>
     public ObservableCollection<T> Target => _target;
 
     /// <summary>
-    /// Reconciles <paramref name="items"/> into the target. Duplicate keys are rejected before any
-    /// mutation so the collection cannot be left in an inconsistent state.
+    /// Reconciles <paramref name="items"/> into the target. Duplicate keys in the input are rejected
+    /// before any mutation; duplicate keys already present in the target are collapsed during
+    /// reconciliation so one desired row leaves exactly one target row.
     /// </summary>
     public void Apply(IReadOnlyList<T> items)
     {
@@ -50,11 +51,20 @@ public sealed class KeyedCollectionBridge<T>
             return;
         }
 
-        // Remove items whose keys are gone, walking backwards so indices stay valid.
+        // Remove items whose keys are gone and surplus occurrences of keys already present in the
+        // target. Walking backwards keeps indices valid; the first occurrence of each key is kept so
+        // unique surviving rows retain their instance identity.
         var desired = new HashSet<string>(newKeys, StringComparer.Ordinal);
+        var firstIndexByKey = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 0; i < _target.Count; i++)
+        {
+            firstIndexByKey.TryAdd(_keySelector(_target[i]), i);
+        }
+
         for (var i = _target.Count - 1; i >= 0; i--)
         {
-            if (!desired.Contains(_keySelector(_target[i])))
+            var key = _keySelector(_target[i]);
+            if (!desired.Contains(key) || firstIndexByKey[key] != i)
             {
                 _target.RemoveAt(i);
             }

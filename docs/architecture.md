@@ -14,7 +14,7 @@ Generated control factories return the actual control type and attach source met
 var button = Button().Content("Save");
 ```
 
-Bare `Button()` requires a consumer-authored import: `using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;` in a file, a project-level `<Using Static="..." />` item, or `[assembly: GenerateGlobalControlFactories]` to ask the generator to emit a global static import. The generator never emits type aliases. A static import can shadow same-named types in member-access positions (`Path.Combine`), so qualify those types or use the per-file import; the `SVCUI001` analyzer reports such identifiers and offers a `global::` code fix. Keeping imports in consumer source lets formatters and IDEs resolve the same compilation the compiler does.
+Bare `Button()` requires a consumer-authored import: `using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;` in a file, a project-level `<Using Include="SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories" Static="true" />` item, or `[assembly: GenerateGlobalControlFactories]` to ask the generator to emit a global static import. The generator never emits type aliases. A static import can shadow same-named types in member-access positions (`Path.Combine`), so qualify those types or use the per-file import; the `SVCUI001` analyzer reports such identifiers and offers a `global::` code fix. Keeping imports in consumer source lets formatters and IDEs resolve the same compilation the compiler does.
 
 `SourceInfo.Get(control)` returns the source file, line, runtime control type, and owning `ViewBase` type when the factory ran during view construction. The metadata is stored separately from the control and does not affect Avalonia property or binding behavior.
 

@@ -46,7 +46,8 @@ public static class AppBuilderExtensions
     public static AppBuilder UseServiceProvider(this AppBuilder appBuilder, IServiceProvider serviceProvider)
     {
         SetConfigurationOnce(
-            nameof(ServiceProvider), serviceProvider, ref _serviceProvider, ref _serviceProviderOwner, appBuilder);
+            nameof(ServiceProvider), serviceProvider, ref _serviceProvider, ref _serviceProviderOwner, appBuilder,
+            useReferenceIdentity: true);
         return appBuilder;
     }
 
@@ -116,9 +117,17 @@ public static class AppBuilderExtensions
         T value,
         ref T field,
         ref WeakReference<object>? ownerReference,
-        AppBuilder appBuilder)
+        AppBuilder appBuilder,
+        bool useReferenceIdentity = false)
     {
-        if (ownerReference is not null && !EqualityComparer<T>.Default.Equals(field, value))
+        // Service providers are identified by instance: overriding Equals must not let a different
+        // provider bypass the "same instance is idempotent" rule. Strategies and delegates keep
+        // their normal value/delegate equality.
+        var sameValue = useReferenceIdentity
+            ? ReferenceEquals(field, value)
+            : EqualityComparer<T>.Default.Equals(field, value);
+
+        if (ownerReference is not null && !sameValue)
         {
             ownerReference.TryGetTarget(out var owner);
             var fromAnotherBuilder = !ReferenceEquals(owner, appBuilder);

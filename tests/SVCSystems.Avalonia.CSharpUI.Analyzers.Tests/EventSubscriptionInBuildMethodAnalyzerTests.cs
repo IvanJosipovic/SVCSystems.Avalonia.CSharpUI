@@ -16,6 +16,16 @@ public sealed class EventSubscriptionInBuildMethodAnalyzerTests
         }
         """;
 
+    private const string OtherViewBaseSource = """
+        namespace Other
+        {
+            public class ViewBase
+            {
+                protected virtual object Build() => new object();
+            }
+        }
+        """;
+
     [Fact]
     public void RuleIsAWarningInTheExpectedCategory()
     {
@@ -53,6 +63,67 @@ public sealed class EventSubscriptionInBuildMethodAnalyzerTests
                 .WithLocation(0)
                 .WithMessage(
                     "Event 'Changed' is subscribed inside Build(); the handler may be attached again on every rebuild"));
+
+        await test.RunAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task ReportsEventSubscriptionInIndirectViewBaseSubclassAsync()
+    {
+        var test = CreateAnalyzerTest();
+        test.TestState.Sources.Add("""
+            namespace App
+            {
+                public class Middle : SVCSystems.Avalonia.CSharpUI.ViewBase
+                {
+                }
+
+                public sealed class MyView : Middle
+                {
+                    public event System.Action Changed;
+
+                    protected override object Build()
+                    {
+                        {|#0:Changed += Handle|};
+                        return new object();
+                    }
+
+                    private void Handle() { }
+                }
+            }
+            """);
+
+        test.ExpectedDiagnostics.Add(
+            new DiagnosticResult(EventSubscriptionInBuildMethodAnalyzer.DiagnosticId, DiagnosticSeverity.Warning)
+                .WithLocation(0)
+                .WithMessage(
+                    "Event 'Changed' is subscribed inside Build(); the handler may be attached again on every rebuild"));
+
+        await test.RunAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task DoesNotReportForSameNamedViewBaseInAnotherNamespaceAsync()
+    {
+        var test = CreateAnalyzerTest();
+        test.TestState.Sources.Add(OtherViewBaseSource);
+        test.TestState.Sources.Add("""
+            namespace App
+            {
+                public sealed class MyView : Other.ViewBase
+                {
+                    public event System.Action Changed;
+
+                    protected override object Build()
+                    {
+                        Changed += Handle;
+                        return new object();
+                    }
+
+                    private void Handle() { }
+                }
+            }
+            """);
 
         await test.RunAsync(TestContext.Current.CancellationToken);
     }
