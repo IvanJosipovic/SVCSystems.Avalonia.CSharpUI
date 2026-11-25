@@ -25,7 +25,6 @@ public class HotPathBenchmarks
     private UsageResult _usage = null!;
     private INamedTypeSymbol _button = null!;
     private ControlModel _buttonModel = null!;
-    private HashSet<string> _factoryNames = null!;
     private int _variantIndex;
 
     [GlobalSetup]
@@ -37,7 +36,6 @@ public class HotPathBenchmarks
         _button = _compilation.GetTypeByMetadataName("Avalonia.Controls.Button") as INamedTypeSymbol
                   ?? throw new InvalidOperationException("Avalonia.Controls.Button was not found.");
         _buttonModel = ControlModelBuilder.Build(_button, _compilation.Assembly);
-        _factoryNames = new HashSet<string>(StringComparer.Ordinal) { "Button", "Grid", "Path", "Border" };
         _ = BenchmarkWorkload.ColdVariants;
     }
 
@@ -83,9 +81,6 @@ public class HotPathBenchmarks
     [Benchmark(Description = "Stage: generate one control's extensions")]
     public string? GenerateExtensions() =>
         new ExternalGeneratorHost().GenerateExtensions(_buttonModel, _compilation, publish: false, suppressOverlappingSetters: true);
-
-    [Benchmark(Description = "Stage: resolve global type aliases")]
-    public object TypeAliasResolver_Resolve() => TypeAliasResolver.Resolve(NextVariant(), _factoryNames);
 
     // ---------- Individual helpers (hot micro-operations) ----------
 

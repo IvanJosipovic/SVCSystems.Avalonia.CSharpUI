@@ -41,15 +41,17 @@ internal readonly struct GenerationDiagnostic : IEquatable<GenerationDiagnostic>
 {
     private readonly int _hash;
 
-    internal GenerationDiagnostic(string id, string message, DiagnosticSeverity severity)
+    internal GenerationDiagnostic(string id, string message, DiagnosticSeverity severity, Location? location = null)
     {
         Id = id;
         Message = message;
         Severity = severity;
+        Location = location;
         unchecked
         {
             var hash = (id?.GetHashCode() ?? 0) * 397 ^ (message?.GetHashCode() ?? 0);
-            _hash = (hash * 397) ^ (int)severity;
+            hash = (hash * 397) ^ (int)severity;
+            _hash = (hash * 397) ^ (location?.ToString()?.GetHashCode() ?? 0);
         }
     }
 
@@ -59,10 +61,13 @@ internal readonly struct GenerationDiagnostic : IEquatable<GenerationDiagnostic>
 
     internal DiagnosticSeverity Severity { get; }
 
+    internal Location? Location { get; }
+
     public bool Equals(GenerationDiagnostic other) =>
         string.Equals(Id, other.Id, StringComparison.Ordinal) &&
         string.Equals(Message, other.Message, StringComparison.Ordinal) &&
-        Severity == other.Severity;
+        Severity == other.Severity &&
+        string.Equals(Location?.ToString(), other.Location?.ToString(), StringComparison.Ordinal);
 
     public override bool Equals(object? obj) => obj is GenerationDiagnostic other && Equals(other);
 
@@ -128,6 +133,9 @@ internal sealed class GenerationResultComparer : IEqualityComparer<GenerationRes
 /// </summary>
 public sealed class UsageDrivenMarkupGenerator
 {
+    private const string GlobalFactoriesAttributeName =
+        "SVCSystems.Avalonia.CSharpUI.GenerateGlobalControlFactoriesAttribute";
+
     private sealed class TextBox
     {
         internal string Text = string.Empty;
@@ -159,14 +167,14 @@ public sealed class UsageDrivenMarkupGenerator
         isEnabledByDefault: true,
         description: "A control name used in source matched more than one type. All matches were generated so code compiles regardless of which type was meant.");
 
-    internal static readonly DiagnosticDescriptor UnaliasableFactoryName = new(
-        id: "SVCUIGEN007",
-        title: "Control factory name cannot be aliased",
-        messageFormat: "Control factory name '{0}' cannot be aliased because it {1}. Usages of that name as a type may be shadowed by the generated factory call, so qualify them with their namespace.",
+    internal static readonly DiagnosticDescriptor CollidingFactoryName = new(
+        id: "SVCUIGEN009",
+        title: "Colliding control factory name",
+        messageFormat: "Control factory name '{0}' is shared by {1} controls; no factory was generated. Set Alias on one control or construct the control explicitly.",
         category: "SVCSystems.Avalonia.CSharpUI",
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "A factory name is also used as a type, but a global alias cannot be generated for it. Qualify type usages with their namespace.");
+        description: "Two or more controls resolve to the same generated factory name. Factories for all of them are suppressed; registrations are still emitted.");
 
     internal static readonly DiagnosticDescriptor OverlappingPublishers = new(
         id: "SVCUIGEN008",
@@ -208,7 +216,7 @@ public sealed class UsageDrivenMarkupGenerator
                         "SVCSystems.Avalonia.CSharpUI",
                         diagnostic.Severity,
                         isEnabledByDefault: true));
-                sourceContext.ReportDiagnostic(Diagnostic.Create(descriptor, Location.None));
+                sourceContext.ReportDiagnostic(Diagnostic.Create(descriptor, diagnostic.Location ?? Location.None));
             }
         });
     }
@@ -328,6 +336,26 @@ public sealed class UsageDrivenMarkupGenerator
             }
         }
 
+        // A factory name shared by two controls cannot be emitted unambiguously. GetFactoryTargets
+        // drops all such controls; report it at the source declaration instead of failing silently.
+        foreach (var group in models
+                     .Where(static model => model.GenerateFactory &&
+                                            model.IsConstructible &&
+                                            model.Type.IsOrInheritsFrom("Avalonia.Controls.Control"))
+                     .GroupBy(static model => SymbolUtilities.CleanIdentifier(model.FactoryName) ?? model.Type.Name,
+                         StringComparer.Ordinal)
+                     .Where(static group => group.Count() > 1))
+        {
+            var location = group
+                .SelectMany(static model => model.Type.Locations)
+                .FirstOrDefault(static location => location.IsInSource);
+            diagnostics.Add(new GenerationDiagnostic(
+                "SVCUIGEN009",
+                string.Format(CollidingFactoryName.MessageFormat.ToString(), group.Key, group.Count()),
+                DiagnosticSeverity.Warning,
+                location));
+        }
+
         var host = SharedHost;
         foreach (var model in models)
         {
@@ -374,7 +402,7 @@ public sealed class UsageDrivenMarkupGenerator
         }
 
         var factoryTargets = GetFactoryTargets(models);
-        GenerateFactoryUsings(sources, diagnostics, compilation, factoryTargets, cancellationToken);
+        GenerateFactoryUsings(sources, compilation);
         GenerateFactories(sources, compilation, factoryTargets);
         GenerateRegistrations(sources, GetRegistrationTargets(models));
 
@@ -388,34 +416,24 @@ public sealed class UsageDrivenMarkupGenerator
         return new GenerationResult(sources.ToImmutableArray(), diagnostics.ToImmutableArray());
     }
 
-    private static void GenerateFactoryUsings(
-        List<GeneratedSource> sources,
-        List<GenerationDiagnostic> diagnostics,
-        Compilation compilation,
-        IReadOnlyList<ControlModel> factories,
-        CancellationToken cancellationToken)
+    /// <summary>
+    /// Emits the global static factory import only when the consumer explicitly opts in with
+    /// <c>[assembly: GenerateGlobalControlFactories]</c>. No type aliases are generated: a generated
+    /// static import can shadow type names, and patching that with more generated aliases breaks
+    /// tooling that does not reproduce the generated compilation. Consumers should prefer a
+    /// per-file <c>using static</c> or a hand-written project-level <c>Using Static</c> item.
+    /// </summary>
+    private static void GenerateFactoryUsings(List<GeneratedSource> sources, Compilation compilation)
     {
-        var factoryNames = new HashSet<string>(
-            factories.Select(static model => SymbolUtilities.CleanIdentifier(model.FactoryName) ?? model.Type.Name),
-            StringComparer.Ordinal);
-        var resolution = TypeAliasResolver.Resolve(compilation, factoryNames, cancellationToken);
-
-        foreach (var skipped in resolution.Skipped)
+        if (!compilation.Assembly.GetAttributes().Any(static attribute =>
+                attribute.AttributeClass?.ToDisplayString() == GlobalFactoriesAttributeName))
         {
-            diagnostics.Add(new GenerationDiagnostic(
-                "SVCUIGEN007",
-                string.Format(UnaliasableFactoryName.MessageFormat.ToString(), skipped.Name, skipped.Reason),
-                DiagnosticSeverity.Warning));
+            return;
         }
 
-        var source = new StringBuilder(512);
+        var source = new StringBuilder(128);
         source.AppendLine("// <auto-generated />");
         source.AppendLine("global using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;");
-        foreach (var alias in resolution.Aliases)
-        {
-            source.AppendLine($"global using {alias.Key} = {alias.Value};");
-        }
-
         sources.Add(new GeneratedSource("SVCSystemsAvaloniaFactoryUsings.g.cs", source.ToString()));
     }
 

@@ -14,7 +14,7 @@ Generated control factories return the actual control type and attach source met
 var button = Button().Content("Save");
 ```
 
-`Button()` works in any source file. The generator emits a global static import of `GeneratedControlFactories` and global aliases for names that are also used as types (for example `Path = System.IO.Path` and `Grid = Avalonia.Controls.Grid`), so factory calls never shadow normal type usage.
+Bare `Button()` requires a consumer-authored import: `using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;` in a file, a project-level `<Using Static="..." />` item, or `[assembly: GenerateGlobalControlFactories]` to ask the generator to emit a global static import. The generator never emits type aliases. A static import can shadow same-named types in member-access positions (`Path.Combine`), so qualify those types or use the per-file import; the `SVCUI001` analyzer reports such identifiers and offers a `global::` code fix. Keeping imports in consumer source lets formatters and IDEs resolve the same compilation the compiler does.
 
 `SourceInfo.Get(control)` returns the source file, line, runtime control type, and owning `ViewBase` type when the factory ran during view construction. The metadata is stored separately from the control and does not affect Avalonia property or binding behavior.
 
@@ -28,7 +28,7 @@ Generated methods are `internal` to the consuming compilation unless the assembl
 
 Only publicly accessible controls are published; the check is recursive over containing types and type arguments, so a constructed generic with an internal argument stays internal. For declarative views, `AvaloniaPropertyExtensionsGenerator` and `AvaloniaEventExtensionsGenerator` already emit public value, expression-binding and event setters, so the usage-driven generator suppresses just those overloads and keeps the `BindingBase` and `Style<T>` setters they do not provide. Coverage entries carry the originating publisher so propagation through a publisher chain is not mistaken for two independent publishers; overlapping publishers report `SVCUIGEN008`. Legacy entries without an origin keep an unknown origin through propagation and are excluded from overlap comparisons while still suppressing regeneration.
 
-If control analysis or emission fails, `SVCUIGEN003` reports the control and error at compile time. When a name matches more than one control type, `SVCUIGEN006` reports the ambiguity and all candidates are generated. When a factory name cannot be given a type alias, `SVCUIGEN007` warns that type usages with that name should be namespace-qualified. See [the usage-driven design](usage-driven-generation.md) for details.
+If control analysis or emission fails, `SVCUIGEN003` reports the control and error at compile time. When a name matches more than one control type, `SVCUIGEN006` reports the ambiguity and all candidates are generated. When two controls share a generated factory name, `SVCUIGEN009` reports the collision at the declaration and suppresses both factories (registrations remain). The `SVCUI001` analyzer reports factory names shadowing types in consumer source. See [the usage-driven design](usage-driven-generation.md) for details.
 
 ## Generator metadata
 

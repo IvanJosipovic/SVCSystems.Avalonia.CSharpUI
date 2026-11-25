@@ -345,10 +345,8 @@ internal static class SymbolUtilities
         return string.Join(".", parts);
     }
 
-    internal static string BuildExtensionClassName(INamedTypeSymbol typeSymbol)
-    {
-        return $"{BuildTypeIdentifier(typeSymbol)}_MarkupExtensions";
-    }
+    internal static string BuildExtensionClassName(INamedTypeSymbol typeSymbol) =>
+        $"{NamingConventions.ControlTypeIdentifier(typeSymbol)}_MarkupExtensions";
 
     internal static string BuildTypeIdentifier(INamedTypeSymbol typeSymbol)
     {

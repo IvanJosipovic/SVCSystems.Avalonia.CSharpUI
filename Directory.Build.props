@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <!-- Generated global usings/aliases must not be simplified during build: IDE0001/0002/0005
+         would rewrite them into names shadowed by the generated control factories. Their
+         severity stays configured in .editorconfig for IDE/analyzer consumers. -->
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+</Project>

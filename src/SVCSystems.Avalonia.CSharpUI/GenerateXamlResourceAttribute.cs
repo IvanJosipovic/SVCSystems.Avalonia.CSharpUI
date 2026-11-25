@@ -6,6 +6,14 @@ namespace SVCSystems.Avalonia.CSharpUI;
 /// Generates an internal factory in SVCSystems.Avalonia.CSharpUI for a referenced library's
 /// compiled XAML resource dictionary or styles. Requires .NET 10 or later.
 /// </summary>
+/// <remarks>
+/// The generated factory reaches the referenced assembly's compiled-XAML <c>Build:/...</c> method
+/// through <see cref="System.Runtime.CompilerServices.UnsafeAccessorAttribute"/>, so no runtime
+/// reflection is needed and the call is trimming/AOT friendly as long as the accessor target
+/// survives. Callers must reference the resource library at build time (only referenced
+/// assemblies are scanned) and must keep its generated compiled-XAML resources; trimming away
+/// the accessor target shows up as a missing-member warning from the trimmer/AOT compiler.
+/// </remarks>
 [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]
 public sealed class GenerateXamlResourceAttribute : Attribute
 {

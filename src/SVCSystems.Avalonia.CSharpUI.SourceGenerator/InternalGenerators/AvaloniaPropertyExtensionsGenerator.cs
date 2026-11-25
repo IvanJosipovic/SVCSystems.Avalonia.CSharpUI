@@ -60,7 +60,7 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
             AppendUsingDirective(sb, emittedUsings, $"using {typeNamespace};");
 
         // Build the extension class name - handle nested classes properly
-        var extensionClassName = BuildExtensionClassName(typeSymbol);
+        var extensionClassName = NamingConventions.ViewExtensionClassName(typeSymbol);
 
         // Fully qualified control type name including namespace, containing types and type parameters
         var controlTypeQualified = GetControlTypeQualifiedName(typeSymbol);
@@ -113,31 +113,8 @@ public class AvaloniaPropertyExtensionsGenerator : IIncrementalGenerator
     }
 
     internal static string GetHintName(INamedTypeSymbol typeSymbol) =>
-        SymbolUtilities.RemoveIllegalFileNameCharacters(BuildExtensionClassName(typeSymbol)) + "Extensions.g.cs";
-
-    private static string BuildExtensionClassName(INamedTypeSymbol? typeSymbol)
-    {
-        if (typeSymbol == null)
-            return "Unknown";
-
-        var parts = new List<string>();
-        
-        // Build from innermost to outermost
-        var current = typeSymbol;
-        while (current != null)
-        {
-            var name = current.Name;
-            if (current.TypeParameters.Length > 0)
-            {
-                name += $"`{current.TypeParameters.Length}";
-            }
-            parts.Insert(0, name);
-            
-            current = current.ContainingType;
-        }
-        
-        return SymbolUtilities.CleanIdentifier(string.Join("_", parts)) ?? "Unknown";
-    }
+        SymbolUtilities.RemoveIllegalFileNameCharacters(
+            NamingConventions.ViewExtensionClassName(typeSymbol)) + "Extensions.g.cs";
 
     private static string BuildAllTypeParameters(ClassDeclarationSyntax type)
     {

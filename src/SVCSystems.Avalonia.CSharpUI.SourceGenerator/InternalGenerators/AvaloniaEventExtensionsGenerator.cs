@@ -71,10 +71,7 @@ public class AvaloniaEventExtensionsGenerator : IIncrementalGenerator
         var nestedQualifiedTypeName = GetNestedQualifiedName(classDecl);
 
         // Create a unique and valid extension class/file name that includes namespace and nesting
-        var fullTypePathForId = (string.IsNullOrWhiteSpace(typeNamespace) ? string.Empty : typeNamespace + ".") + nestedQualifiedTypeName;
-        var safeId = fullTypePathForId
-            .Replace('.', '_')
-            .Replace('+', '_'); // just in case
+        var safeId = NamingConventions.NestedPathIdentifier(typeNamespace, nestedQualifiedTypeName);
 
         sb.AppendLine("namespace SVCSystems.Avalonia.CSharpUI;");
         sb.AppendLine($"public static partial class {safeId}EventExtensions");
@@ -116,48 +113,17 @@ public class AvaloniaEventExtensionsGenerator : IIncrementalGenerator
         var genericName = eventTypeSyntax.DescendantNodesAndSelf().OfType<GenericNameSyntax>().FirstOrDefault();
         var typeArguments = genericName?.TypeArgumentList.Arguments.Select(arg => arg.ToString()).ToArray();
 
-        // Determine the extension method signature and lambda body
-        string parameterList;
-        string lambdaParameters;
-        string lambdaBody;
-        bool isEventHandler = eventTypeString.StartsWith("EventHandler");
-        bool isAction = eventTypeString.StartsWith("Action");
-
-        if (isEventHandler && typeArguments is { Length: 1 })
-        {
-            // EventHandler<TEventArgs>
-            parameterList = $"Action<{typeArguments[0]}> action";
-            lambdaParameters = "_, args";
-            lambdaBody = "action(args)";
-        }
-        else if (isEventHandler)
-        {
-            // EventHandler (no generic args)
-            parameterList = "Action<EventArgs> action";
-            lambdaParameters = "_, args";
-            lambdaBody = "action(args)";
-        }
-        else if (isAction && typeArguments is { Length: 1 })
-        {
-            // Action<T>
-            parameterList = $"Action<{typeArguments[0]}> action";
-            lambdaParameters = "args";
-            lambdaBody = "action(args)";
-        }
-        else if (isAction)
-        {
-            // Action (no args)
-            parameterList = "Action action";
-            lambdaParameters = "";
-            lambdaBody = "action()";
-        }
-        else
-        {
-            // Fallback: treat as Action (no args)
-            parameterList = "Action action";
-            lambdaParameters = "";
-            lambdaBody = "action()";
-        }
+        // Derive the delegate's argument types, then use the shared adapter-shape rule so this
+        // generator and ActionToEventGenerator always produce the same Action signature.
+        string[] parameterTypes = eventTypeString.StartsWith("EventHandler", StringComparison.Ordinal)
+            ? typeArguments is { Length: 1 } ? [typeArguments[0]] : ["global::System.EventArgs"]
+            : eventTypeString.StartsWith("Action", StringComparison.Ordinal)
+                ? typeArguments is { Length: 1 } ? [typeArguments[0]] : []
+                : [];
+        var shape = EventAdapterShapes.For(parameterTypes);
+        var parameterList = shape.ParameterList;
+        var lambdaParameters = shape.LambdaParameters;
+        var lambdaBody = shape.ActionCall;
 
         // Compose the extension method
         var extensionText =

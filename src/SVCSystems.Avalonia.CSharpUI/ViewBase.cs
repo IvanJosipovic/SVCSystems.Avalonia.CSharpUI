@@ -4,6 +4,10 @@ using Avalonia.Threading;
 using System;
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace SVCSystems.Avalonia.CSharpUI;
 
@@ -78,6 +82,10 @@ public abstract class ViewBase : Decorator, IReloadable, IDeclarativeViewBase
     private INameScope? _nameScope;
     private IReadOnlyList<IStyle>? _viewStyles;
 
+    // Identity hash code (not the overridable GetHashCode) so each view gets a stable id
+    // even when a view type overrides equality/hashing.
+    private readonly string _instanceId;
+
     /// <summary>
     /// Current NameScope of this view
     /// </summary>
@@ -96,11 +104,17 @@ public abstract class ViewBase : Decorator, IReloadable, IDeclarativeViewBase
 
     protected ViewBase(ViewInitializationStrategy initializationStrategy)
     {
+        _instanceId = RuntimeHelpers.GetHashCode(this).ToString("x8", CultureInfo.InvariantCulture);
         InitializationStrategy = initializationStrategy;
 
         if (initializationStrategy == ViewInitializationStrategy.Immediate)
             Initialize();
     }
+
+    /// <summary>
+    /// Stable per-instance source label used to correlate diagnostics from concurrently failing views.
+    /// </summary>
+    private string DiagnosticSource => $"{GetType().Name}#{_instanceId}";
 
     /// <summary>
     /// Gets the initialization strategy used by this view.
@@ -130,9 +144,14 @@ public abstract class ViewBase : Decorator, IReloadable, IDeclarativeViewBase
     {
     }
 
-    public void Initialize()
+    /// <summary>
+    /// Builds the view once. Subsequent calls are ignored unless a reload has forced a rebuild.
+    /// </summary>
+    public void Initialize() => InitializeCore(force: false);
+
+    private void InitializeCore(bool force)
     {
-        if (_isInitialized || _isInitializing)
+        if (!force && (_isInitialized || _isInitializing))
             return;
 
         _isInitializing = true;
@@ -151,7 +170,16 @@ public abstract class ViewBase : Decorator, IReloadable, IDeclarativeViewBase
             }
 
             var content = Build();
-            Child = content as Control;
+            if (content is not Control builtControl)
+            {
+                var actualType = content?.GetType().FullName ?? "<null>";
+                var message = $"Build() in {GetType().FullName} returned '{actualType}', but a {nameof(Control)} instance is required for Child.";
+                Diagnostics.DiagnosticsErrorLog.Record(
+                    Diagnostics.DiagnosticSeverity.Error, Diagnostics.DiagnosticCategory.Build, DiagnosticSource, message);
+                throw new ViewBuildingException(message, new InvalidOperationException(message));
+            }
+
+            Child = builtControl;
 
             _isInitialized = true;
             ViewInitialized?.Invoke();
@@ -169,7 +197,7 @@ public abstract class ViewBase : Decorator, IReloadable, IDeclarativeViewBase
             // A ViewBuildingException coming from a _set call is already recorded at its creation site
             // (handled by the catch above), so only the generic wrap is recorded here.
             Diagnostics.DiagnosticsErrorLog.Record(
-                Diagnostics.DiagnosticSeverity.Error, Diagnostics.DiagnosticCategory.Build, GetType().Name, message);
+                Diagnostics.DiagnosticSeverity.Error, Diagnostics.DiagnosticCategory.Build, DiagnosticSource, message);
             throw new ViewBuildingException(message, ex);
         }
         finally
@@ -218,33 +246,89 @@ public abstract class ViewBase : Decorator, IReloadable, IDeclarativeViewBase
     }
 
     #region Hot reload stuff
+    /// <summary>
+    /// Reloads this view on the UI thread and returns a task that completes when the rebuild is done.
+    /// </summary>
+    /// <remarks>
+    /// The returned task does not fault: exceptions are recorded to <see cref="Diagnostics.DiagnosticsErrorLog"/>
+    /// instead, so callers may safely ignore it. The re-entrancy flags are owned by
+    /// <see cref="InitializeCore"/> and this method; a reload never clears <c>_isInitializing</c>
+    /// behind an in-flight build.
+    /// </remarks>
+    public Task ReloadAsync()
+    {
+        return ReloadCoreAsync();
+    }
+
+    private async Task ReloadCoreAsync()
+    {
+        try
+        {
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                // InitializeCore owns the flags during a build; do not interleave with it.
+                if (_isInitializing)
+                    return;
+
+                OnBeforeReload();
+                SetValue(ChildProperty, null);
+                VisualChildren.Clear();
+
+                // BuildStyles() runs again in Initialize(); drop only the styles this view
+                // contributed so externally added styles survive and nothing accumulates.
+                if (_viewStyles is not null)
+                {
+                    foreach (var style in _viewStyles)
+                        Styles.Remove(style);
+                    _viewStyles = null;
+                }
+
+                _nameScope = null;
+                _isInitialized = false;
+
+                InitializeCore(force: true);
+
+                InvalidateArrange();
+                InvalidateMeasure();
+                InvalidateVisual();
+            });
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.DiagnosticsErrorLog.Record(
+                Diagnostics.DiagnosticSeverity.Error,
+                Diagnostics.DiagnosticCategory.Runtime,
+                DiagnosticSource,
+                $"Reload failed in {GetType().FullName}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Forces a reload of this view. Kept for <see cref="IReloadable"/> compatibility;
+    /// use <see cref="ReloadAsync"/> when completion or failures need to be observed by the caller.
+    /// </summary>
     public void Reload()
     {
-        Dispatcher.UIThread.InvokeAsync(() =>
+        // ReloadAsync never faults, but observe the task defensively so that no exception
+        // can go unobserved through this fire-and-forget entry point.
+        ObserveFaults(ReloadAsync());
+    }
+
+    private static void ObserveFaults(Task task)
+    {
+        if (task.IsCompleted)
         {
-            OnBeforeReload();
-            SetValue(ChildProperty, null);
-            VisualChildren.Clear();
+            if (task.IsFaulted)
+                _ = task.Exception;
 
-            // BuildStyles() runs again in Initialize(); drop only the styles this view
-            // contributed so externally added styles survive and nothing accumulates.
-            if (_viewStyles is not null)
-            {
-                foreach (var style in _viewStyles)
-                    Styles.Remove(style);
-                _viewStyles = null;
-            }
+            return;
+        }
 
-            _nameScope = null;
-            _isInitialized = false;
-            _isInitializing = false;
-
-            Initialize();
-
-            InvalidateArrange();
-            InvalidateMeasure();
-            InvalidateVisual();
-        });
+        _ = task.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     protected virtual void OnBeforeReload()

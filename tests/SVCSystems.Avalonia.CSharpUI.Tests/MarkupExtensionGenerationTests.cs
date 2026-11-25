@@ -852,6 +852,10 @@ public class MarkupExtensionGenerationTests
 
         AssertNoErrors(result.OutputCompilation);
 
+        // Silent-drop guard: IBinding-valued properties are skipped by the value setter emitter
+        // (SymbolUtilities.HasUnsupportedExternalValueType) because the BindingBase overloads below
+        // replace them. If that list ever shrinks to zero this test would pass vacuously, so keep
+        // the lower bound. Mirrors Reactor's DescriptorSilentDropGuardTests self-validation rule.
         var properties = new[]
         {
             (Control: "AutoCompleteBox", Property: "ValueMemberBinding"),
@@ -859,6 +863,7 @@ public class MarkupExtensionGenerationTests
             (Control: "Primitives_SelectingItemsControl", Property: "SelectedValueBinding"),
             (Control: "TableViewColumn", Property: "Binding")
         };
+        Assert.True(properties.Length >= 4, "The silent-drop guard must inspect at least four binding-valued properties.");
 
         foreach (var (control, property) in properties)
         {
@@ -886,6 +891,44 @@ public class MarkupExtensionGenerationTests
                 generated,
                 StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void Constructor_overloads_escape_keyword_parameter_names()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+
+            public struct KeywordValue
+            {
+                public KeywordValue(double @class) { }
+            }
+
+            public sealed class KeywordControl : Control
+            {
+                public static readonly StyledProperty<KeywordValue> ValueProperty =
+                    AvaloniaProperty.Register<KeywordControl, KeywordValue>(nameof(Value));
+
+                public KeywordValue Value
+                {
+                    get => GetValue(ValueProperty);
+                    set => SetValue(ValueProperty, value);
+                }
+            }
+
+            public static class Usage
+            {
+                public static void Mention() => _ = typeof(KeywordControl);
+            }
+            """;
+
+        var result = RunGenerator(CreateCompilation("KeywordParameters", source));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.Contains(result.GeneratedSources, generated =>
+            generated.Contains("@class", StringComparison.Ordinal) &&
+            generated.Contains("KeywordValue(@class)", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1325,56 +1368,42 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
-    public void Inaccessible_type_does_not_produce_a_global_alias()
+    public void Global_factories_import_is_not_emitted_by_default()
     {
         const string source = """
             using Avalonia.Controls;
 
             public static class Usage
             {
-                private sealed class Button : Control { }
-
                 public static object Create() => new Button();
             }
             """;
-        var result = RunGenerator(CreateCompilation("InaccessibleAlias", source));
+        var result = RunGenerator(CreateCompilation("NoGlobalFactories", source, optIntoGlobalFactories: false));
 
         AssertNoErrors(result.OutputCompilation);
-        Assert.Contains(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
         Assert.DoesNotContain(result.GeneratedSources, static generated =>
-            generated.Contains("global using Button =", StringComparison.Ordinal));
+            generated.Contains("global using static", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
     }
 
     [Fact]
-    public void Global_namespace_member_does_not_produce_a_conflicting_alias()
+    public void Opt_in_import_does_not_generate_type_aliases()
     {
         const string source = """
-            using Avalonia;
             using Avalonia.Controls;
-
-            public sealed class Widget : Control
-            {
-                public static readonly StyledProperty<int> ValueProperty =
-                    AvaloniaProperty.Register<Widget, int>(nameof(Value));
-
-                public int Value
-                {
-                    get => GetValue(ValueProperty);
-                    set => SetValue(ValueProperty, value);
-                }
-            }
 
             public static class Usage
             {
-                public static Widget Create() => new Widget();
+                public static object Create() => new Button();
             }
             """;
-        var result = RunGenerator(CreateCompilation("GlobalNamespaceAlias", source));
+        var result = RunGenerator(CreateCompilation("OptInNoAliases", source));
 
         AssertNoErrors(result.OutputCompilation);
-        Assert.Contains(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
-        Assert.DoesNotContain(result.GeneratedSources, static generated =>
-            generated.Contains("global using Widget =", StringComparison.Ordinal));
+        Assert.Contains(result.GeneratedSources, generated =>
+            generated.Contains("global using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.GeneratedSources, generated =>
+            generated.Contains("global using Button =", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1523,7 +1552,7 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
-    public void User_alias_prevents_generated_alias_and_reports_SVCUIGEN007()
+    public void User_alias_is_respected_without_generated_aliases()
     {
         const string source = """
             using Button = System.Text.StringBuilder;
@@ -1533,18 +1562,16 @@ public class MarkupExtensionGenerationTests
                 public static Button CreateAlias() => new Button();
             }
             """;
-        var result = RunGenerator(CreateCompilation("UserAlias", source));
+        var result = RunGenerator(CreateCompilation("UserAliasOptIn", source));
 
         AssertNoErrors(result.OutputCompilation);
-        var diagnostic = Assert.Single(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
-        Assert.Contains("Button", diagnostic.GetMessage(), StringComparison.Ordinal);
-        Assert.Contains("using alias", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
         Assert.DoesNotContain(result.GeneratedSources, static generated =>
             generated.Contains("global using Button =", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void Multiple_types_for_a_factory_name_report_SVCUIGEN007()
+    public void Ambiguous_factory_names_do_not_generate_aliases()
     {
         const string source = """
             using Avalonia.Controls;
@@ -1558,12 +1585,12 @@ public class MarkupExtensionGenerationTests
                 public static object M() => new { X = new A.Shared(), Y = new B.Shared() };
             }
             """;
-        var result = RunGenerator(CreateCompilation("MultipleTypeNames", source));
+        var result = RunGenerator(CreateCompilation("MultipleTypeNamesOptIn", source));
 
         AssertNoErrors(result.OutputCompilation);
-        var diagnostic = Assert.Single(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
-        Assert.Contains("Shared", diagnostic.GetMessage(), StringComparison.Ordinal);
-        Assert.Contains("more than one type", diagnostic.GetMessage(), StringComparison.Ordinal);
+        Assert.DoesNotContain(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
+        Assert.DoesNotContain(result.GeneratedSources, static generated =>
+            generated.Contains("global using Shared =", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1603,9 +1630,9 @@ public class MarkupExtensionGenerationTests
     }
 
     [Fact]
-    public void Global_factory_import_is_generated_with_type_aliases()
+    public void Opt_in_factory_import_is_generated_and_alias_free()
     {
-        const string source = """
+        var source = """
             using System.IO;
             using Avalonia.Controls;
 
@@ -1615,15 +1642,18 @@ public class MarkupExtensionGenerationTests
                 public static Button Create() => new Button();
             }
             """;
-        var result = RunGenerator(CreateCompilation("GlobalFactoryImport", source));
+        // With the static import opted in and no generated aliases, Path must be qualified.
+        source = source.Replace("Path.Combine", "System.IO.Path.Combine", StringComparison.Ordinal);
+        var result = RunGenerator(CreateCompilation("GlobalFactoryImportOptIn", source));
 
         AssertNoErrors(result.OutputCompilation);
         Assert.Contains(result.GeneratedSources, generated =>
             generated.Contains("global using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;", StringComparison.Ordinal));
-        Assert.Contains(result.GeneratedSources, generated =>
-            generated.Contains("global using Path = global::System.IO.Path;", StringComparison.Ordinal));
-        Assert.Contains(result.GeneratedSources, generated =>
-            generated.Contains("global using Button = global::Avalonia.Controls.Button;", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.GeneratedSources, generated =>
+            generated.Contains("global using Path =", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.GeneratedSources, generated =>
+            generated.Contains("global using Button =", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN007");
     }
 
     [Fact]
@@ -1645,9 +1675,10 @@ public class MarkupExtensionGenerationTests
         driver = driver.RunGenerators(compilation, TestContext.Current.CancellationToken);
         var firstResult = driver.GetRunResult().Results.Single();
 
-        // A comment-only edit must not invalidate the cached usage-name inputs.
+        // A comment-only edit must not invalidate the cached usage-name inputs. Use the compilation's
+        // text so the opt-in assembly attribute is preserved across the edit.
         var editedTree = CSharpSyntaxTree.ParseText(
-            "// unrelated edit\n" + source,
+            "// unrelated edit\n" + compilation.SyntaxTrees.Single().GetText(TestContext.Current.CancellationToken).ToString(),
             parseOptions,
             cancellationToken: TestContext.Current.CancellationToken);
         compilation = compilation.ReplaceSyntaxTree(compilation.SyntaxTrees.Single(), editedTree);
@@ -1662,6 +1693,75 @@ public class MarkupExtensionGenerationTests
         // came from the incremental pipeline rather than a fresh generator run.
         Assert.True(secondResult.TrackedSteps.ContainsKey("SourceOutput"));
         Assert.NotEmpty(secondResult.GeneratedSources);
+    }
+
+    [Fact]
+    public void Post_init_global_usings_source_has_generated_header()
+    {
+        var result = RunFullGenerator(CreateCompilation("PostInitUsings", "public static class Usage { }"));
+
+        var source = Assert.Single(result.GeneratedSources, generated =>
+            generated.Contains("SVCSystems.Avalonia.CSharpUI.CommonExtensions", StringComparison.Ordinal));
+        Assert.Equal(
+            "// <auto-generated />\nglobal using SVCSystems.Avalonia.CSharpUI;\n" +
+            "global using SVCSystems.Avalonia.CSharpUI.CommonExtensions;\n",
+            source.Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void No_names_are_injected_that_a_formatter_could_simplify_away()
+    {
+        const string source = """
+            using System.IO;
+            using Avalonia.Controls;
+
+            public static class Usage
+            {
+                public static string Combine() => Path.Combine("a", "b");
+                public static object Create() => new Button();
+            }
+            """;
+        var result = RunFullGenerator(CreateCompilation("FormatterSafety", source, optIntoGlobalFactories: false));
+
+        AssertNoErrors(result.OutputCompilation);
+        Assert.DoesNotContain(result.GeneratedSources, generated =>
+            generated.Contains("global using static", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.GeneratedSources, generated =>
+            generated.Contains("global using ", StringComparison.Ordinal) &&
+            !generated.Contains("SVCSystems.Avalonia.CSharpUI.CommonExtensions", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void User_using_aliases_do_not_change_generated_output()
+    {
+        const string usage = "public static class Usage { public static object Create() => new Avalonia.Controls.Button(); }";
+        var withAlias = RunGenerator(CreateCompilation("AliasA", "using Button = System.Text.StringBuilder;\n" + usage));
+        var withoutAlias = RunGenerator(CreateCompilation("AliasB", usage));
+
+        Assert.Equal(withAlias.GeneratedSources, withoutAlias.GeneratedSources);
+    }
+
+    [Fact]
+    public void Colliding_factory_name_is_reported_at_the_control_declaration()
+    {
+        const string source = """
+            using Avalonia;
+            using Avalonia.Controls;
+
+            namespace One { public sealed class Shared : Control { } }
+            namespace Two { public sealed class Shared : Control { } }
+
+            public static class Usage
+            {
+                public static object Create() => new object();
+            }
+            """;
+        var result = RunGenerator(CreateCompilation("FactoryCollision", source));
+
+        var diagnostic = Assert.Single(result.Diagnostics, static diagnostic => diagnostic.Id == "SVCUIGEN009");
+        Assert.Equal(DiagnosticSeverity.Warning, diagnostic.Severity);
+        Assert.NotEqual(Microsoft.CodeAnalysis.Location.None, diagnostic.Location);
+        Assert.Contains("Shared", diagnostic.GetMessage(), StringComparison.Ordinal);
     }
 
     private static GeneratorResult RunFullGenerator(CSharpCompilation compilation) =>
@@ -1731,11 +1831,43 @@ public class MarkupExtensionGenerationTests
         return MetadataReference.CreateFromImage(ImmutableArray.CreateRange(assemblyStream.ToArray()));
     }
 
+    private const string GlobalFactoriesOptIn =
+        "[assembly: SVCSystems.Avalonia.CSharpUI.GenerateGlobalControlFactories]\n";
+
+    // Most generator tests exercise consumer code that uses bare factory calls, so they opt in
+    // explicitly. Tests of the default (no injected import) pass optIntoGlobalFactories: false.
+    private static string WithGlobalFactoriesOptIn(string source, bool optIntoGlobalFactories)
+    {
+        if (!optIntoGlobalFactories || source.Contains("GenerateGlobalControlFactories", StringComparison.Ordinal))
+        {
+            return source;
+        }
+
+        // Global attributes must follow using directives. Insert after the leading compiler
+        // directives, extern aliases, usings, comments and assembly attributes.
+        var lines = source.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        var insertAt = 0;
+        while (insertAt < lines.Length &&
+               (string.IsNullOrWhiteSpace(lines[insertAt]) ||
+                lines[insertAt].StartsWith("using ", StringComparison.Ordinal) ||
+                lines[insertAt].StartsWith("extern ", StringComparison.Ordinal) ||
+                lines[insertAt].StartsWith("#", StringComparison.Ordinal) ||
+                lines[insertAt].TrimStart().StartsWith("//", StringComparison.Ordinal) ||
+                lines[insertAt].TrimStart().StartsWith("[assembly:", StringComparison.Ordinal)))
+        {
+            insertAt++;
+        }
+
+        return string.Join("\n",
+            [.. lines[..insertAt], GlobalFactoriesOptIn.TrimEnd(), .. lines[insertAt..]]);
+    }
+
     private static CSharpCompilation CreateCompilation(
         string assemblyName,
         string source,
         MetadataReference? additionalReference = null,
-        CSharpCompilationOptions? compilationOptions = null)
+        CSharpCompilationOptions? compilationOptions = null,
+        bool optIntoGlobalFactories = true)
     {
         var references = additionalReference is null
             ? PlatformReferences
@@ -1743,7 +1875,7 @@ public class MarkupExtensionGenerationTests
 
         return CSharpCompilation.Create(
             assemblyName,
-            [CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Preview))],
+            [CSharpSyntaxTree.ParseText(WithGlobalFactoriesOptIn(source, optIntoGlobalFactories), new CSharpParseOptions(LanguageVersion.Preview))],
             references,
             compilationOptions ?? new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
     }
@@ -1754,7 +1886,7 @@ public class MarkupExtensionGenerationTests
         params MetadataReference[] additionalReferences) =>
         CSharpCompilation.Create(
             assemblyName,
-            [CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Preview))],
+            [CSharpSyntaxTree.ParseText(WithGlobalFactoriesOptIn(source, optIntoGlobalFactories: true), new CSharpParseOptions(LanguageVersion.Preview))],
             PlatformReferences.AddRange(additionalReferences),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
 

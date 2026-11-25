@@ -3,7 +3,7 @@
 Status: **implemented**
 Applies to: `SVCSystems.Avalonia.CSharpUI.SourceGenerator`
 
-Implementation notes: the curated common-control list is a `typeof(...)` assembly attribute (`GenerateMarkupControlAttribute`) in the runtime library, because the `netstandard2.0` generator cannot reference Avalonia 12 (net8.0/net10.0 only). The same attribute can be applied in the consuming assembly as a narrow per-type opt-in. The legacy `GenerateMarkupExtensionsFor*` attributes and public-extension publishing are removed. **248 tests pass** (124 per target framework) on net10.0 and net11.0.
+Implementation notes: the curated common-control list is a `typeof(...)` assembly attribute (`GenerateMarkupControlAttribute`) in the runtime library, because the `netstandard2.0` generator cannot reference Avalonia 12 (net8.0/net10.0 only). The same attribute can be applied in the consuming assembly as a narrow per-type opt-in. The legacy `GenerateMarkupExtensionsFor*` attributes are removed; public-extension publishing is opt-in via `[GeneratePublicMarkupExtensions]`. **308 tests pass** (154 per target framework) on net10.0 and net11.0.
 
 ## Decisions (confirmed)
 
@@ -13,7 +13,7 @@ Implementation notes: the curated common-control list is a `typeof(...)` assembl
 | Legacy "generate everything" mode | **Removed.** No `[assembly: GenerateMarkupExtensionsForAvalonia]` / `[assembly: GenerateMarkupExtensionsForAssembly]` full-scan escape hatch. |
 | Scope of trimming | **Everything**: fluent extensions, `GeneratedControlFactories`, and `ViewFactoryRegistry` registrations are generated only for the used set (plus the required base-type closure). |
 | Common controls | A curated allowlist of frequently used Avalonia controls is **always** generated, declared with `typeof(...)` in the runtime library and read by the generator from metadata. This is not the removed full-scan mode. |
-| Factory syntax | `Button()` works in any file with no `using static` directive; the generator emits a global static import plus the type aliases needed to avoid shadowing types. |
+| Factory syntax | Bare `Button()` requires a consumer-authored import: a per-file `using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;`, a project-level `<Using Static="..." />` item, or an opt-in `[assembly: GenerateGlobalControlFactories]` that asks the generator to emit a global static import. The generator never emits type aliases. |
 
 Non-goals: changing extension method bodies, the Avalonia property system integration, compiled bindings, source metadata, XAML resource factories, or the declarative-view generators. Those are driven by declarative views and view classes, not by the whole control universe.
 
@@ -66,7 +66,7 @@ UsageDrivenMarkupGenerator               → one ControlModel per used type
 0. **R0 — curated common controls and per-type opt-in.** Types in `[assembly: GenerateMarkupControl(typeof(...))]` are roots. The runtime library declares the built-in list with `typeof` (compile-time checked); the generator reads it from metadata because it cannot reference Avalonia directly. An application can apply the same assembly attribute to force generation for controls that usage detection cannot see, e.g. a control used only from compiled XAML in a referenced library.
 1. **R1 — any simple name.** Every `SimpleNameSyntax` is captured as a string: factory calls, `new X()`, typed declarations/casts, `typeof`, `nameof`, generic arguments, base lists, and fully qualified names (the rightmost segment). Unrelated identifiers are ignored unless they match a catalog factory name.
 2. **R2 — local control declarations.** All `AvaloniaObject`-derived classes declared in the current compilation are roots, so controls created by reflection or from XAML inside the app still get APIs.
-3. **R3 — disambiguation.** Prefer a current-assembly match, then `Avalonia.Controls`. If still ambiguous, generate all candidates with distinct extension-class names and report informational `SVCUIGEN006`.
+3. **R3 — disambiguation.** Keep every candidate whose generated extension-class name is distinct, so source compiles regardless of which control was meant, and report informational `SVCUIGEN006`. When two controls share a generated *factory* name, both factories are suppressed and warning `SVCUIGEN009` is reported at the declaration; registrations are still emitted.
 4. **R4 — base-type closure.** Add each root's full base chain up to `Avalonia.AvaloniaObject`.
 5. **R5 — filtering.** Drop `Ignore = true` types and types inaccessible from generated code. Abstract types stay in the extension set but are excluded from factories/registrations by `IsConstructible`.
 
@@ -82,13 +82,21 @@ Setters are emitted on the type that *declares* the Avalonia property (`External
 
 ### 2.4 Incremental behavior
 
-`UsageNameProvider` captures strings with a cheap syntax transform; unchanged trees are cached by Roslyn. `Collect()` is combined with `CompilationProvider`, and `RegisterSourceOutput` resolves keys, builds each `ControlModel` once in a shared cache, and emits all files from one generator instance. No signature strings are built just for comparison. The factory using/alias source is emitted from the same stage, not post-init, so usage analysis sees the pre-generation compilation where names resolve to real types.
+`UsageNameProvider` captures strings with a cheap syntax transform; unchanged trees are cached by Roslyn. `Collect()` is combined with `CompilationProvider`, and `RegisterSourceOutput` resolves keys, builds each `ControlModel` once in a shared cache, and emits all files from one generator instance. No signature strings are built just for comparison. The optional global static factory import is emitted from the same stage as the other sources; the two always-on namespace imports are post-init. Both are unrelated to usage analysis because no aliases are generated from the pre-generation compilation.
 
 The test `Comment_only_edit_keeps_generated_sources_stable_on_one_driver` reuses one `GeneratorDriver` across a real syntax-tree replacement and asserts the generated sources are unchanged.
 
-### 2.5 Transparent factory calls
+### 2.5 Transparent factory calls — consumer-controlled
 
-A generated `global using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;` makes bare `Button()` available in every file. Because that also makes same-named types resolve as method groups, `TypeAliasResolver` emits `global using X = <resolved type>;` for each factory name the app uses as a type (`Path = System.IO.Path`, `Grid = Avalonia.Controls.Grid`, etc.). Names resolving to several types or already having a user `using X = ...` alias are skipped to avoid `CS1537`, and `SVCUIGEN007` warns that those type usages should be namespace-qualified.
+The generator **does not inject a global static import by default**. Bare factory calls are made available by a consumer-authored import:
+
+```csharp
+using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;
+```
+
+or, project-wide, `<Using Static="SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories" />` in the project file. A project that deliberately wants the import generated can apply `[assembly: GenerateGlobalControlFactories]`; the generator then emits one file containing `global using static ...GeneratedControlFactories;`.
+
+No generated type aliases exist. A static import shadows same-named types in member-access positions (`Path.Combine`, `Canvas.Left`), so callers who opt in must qualify such types (`global::System.IO.Path.Combine`) or use the per-file import instead. The `SVCUI001` analyzer reports shadowed identifier usages and offers a code fix that emits a globally qualified name with a `Simplifier` annotation. This design keeps every name visible in consumer source so formatters and IDEs resolve the same compilation the compiler does.
 
 ### 2.6 XML documentation on generated APIs
 
@@ -104,13 +112,13 @@ Efficiency: reference→path is cached once per assembly identity, each XML file
 
 ## 3. API and compatibility changes
 
-**Removed:** both `GenerateMarkupExtensionsFor*` attributes, `AutoFrameworkAssemblies`, `GetTargetAssemblies`, `AddAvaloniaTargets`, `AddAssemblyAttributeTarget`, `AddTargetAssembly`, `HasGeneratePublicExtensions`, `TargetAssembly`, `GetPublicClasses`, `SVCUIGEN001`, duplicate-provider checks, public-extension publishing, `LocalControlExtensionsGenerator`, `ViewFactoryRegistrationGenerator`.
+**Removed:** both `GenerateMarkupExtensionsFor*` attributes, `AutoFrameworkAssemblies`, `GetTargetAssemblies`, `AddAvaloniaTargets`, `AddAssemblyAttributeTarget`, `AddTargetAssembly`, `HasGeneratePublicExtensions`, `TargetAssembly`, `GetPublicClasses`, `SVCUIGEN001`, `SVCUIGEN007`, duplicate-provider checks, `LocalControlExtensionsGenerator`, `ViewFactoryRegistrationGenerator`, and `TypeAliasResolver` with all generated type aliases.
 
-**Added:** `GenerateMarkupControlAttribute` + the `typeof` list in `CommonControls.cs`; `Usage/` (`UsageNameProvider`, `ControlCatalog`, `UsageResolver`, `UsageResult`, `CommonControls`, `TypeAliasResolver`, `TypeKey`); `DocumentationLookup`; `UsageDrivenMarkupGenerator`. `ExternalAssemblyExtensionsGenerator` and `ControlFactoryGenerator` remain as thin wrappers for direct test hosts.
+**Added:** `GenerateMarkupControlAttribute` + the `typeof` list in `CommonControls.cs`; `GenerateGlobalControlFactoriesAttribute` (opt-in generated global static import); `Usage/` (`UsageNameProvider`, `ControlCatalog`, `UsageResolver`, `UsageResult`, `CommonControls`, `TypeKey`); `DocumentationLookup`; `UsageDrivenMarkupGenerator`; the `SVCUI001` analyzer and code fix in `SVCSystems.Avalonia.CSharpUI.Analyzers`. `ExternalAssemblyExtensionsGenerator` and `ControlFactoryGenerator` remain as thin wrappers for direct test hosts.
 
-**Kept:** `SVCSystemsCSharpUIGeneratorMetadataAttribute` (`Ignore`, `Alias`, `GenerateFactory`) — now the user's direct control over usage resolution and suppression. The inert `Content` option was removed.
+**Kept:** `SVCSystemsCSharpUIGeneratorMetadataAttribute` (`Ignore`, `Alias`, `GenerateFactory`) — now the user's direct control over usage resolution and suppression. The inert `Content` option was removed. Public-extension publishing remains opt-in via `[GeneratePublicMarkupExtensions]`.
 
-**Diagnostics:** `SVCUIGEN003` (generation failure, reused), `SVCUIGEN006` (ambiguous control name, Info), and `SVCUIGEN007` (factory name that cannot be aliased, Warning). Registered in `AnalyzerReleases.Unshipped.md`.
+**Diagnostics:** `SVCUIGEN003` (generation failure, Error), `SVCUIGEN006` (ambiguous control name, Info), `SVCUIGEN008` (overlapping publishers, Warning), `SVCUIGEN009` (colliding factory name, Warning, reported at the control declaration), and `SVCUI001` (factory name shadows a type, Warning, with a `global::` code fix). Registered in the corresponding `AnalyzerReleases.Unshipped.md` files.
 
 The library is in alpha, so these breaking changes (public attributes removed, generated extensions now internal) need no compatibility shims or migration path beyond the `CHANGELOG.md` entry.
 
@@ -123,13 +131,13 @@ The library is in alpha, so these breaking changes (public attributes removed, g
 | 0 — test-first groundwork | Done |
 | 1 — usage detection and resolution | Done |
 | 2 — route fluent extensions through used set | Done; consolidated into `UsageDrivenMarkupGenerator` |
-| 3 — factories, registrations, global using/aliases | Done; registrations cover used controls from any assembly |
+| 3 — factories, registrations, opt-in global import | Done; registrations cover used controls from any assembly; no generated aliases |
 | 4 — remove legacy surface, update samples/docs | Done |
 | 5 — verification and measurement | Done; numbers below |
 
 ## 5. Verification
 
-- `dotnet build` and `dotnet test`: green on net10.0/net11.0, **248/248 tests**.
+- `dotnet build` and `dotnet test`: green on net10.0/net11.0, **308/308 tests** (296 library/generator + 12 analyzer tests).
 - Generated sources in the test project: **202 → 70** external extension files (258 → 170 total generated files).
 - Measured full-solution builds (two runs each, HEAD worktree vs current tree):
 
@@ -138,7 +146,7 @@ The library is in alpha, so these breaking changes (public attributes removed, g
 | Clean rebuild | 8.74s / 8.39s | 6.43s / 6.18s | ~26% faster |
 | Incremental (one view file edited) | 2.99s / 3.18s | 1.79s / 1.60s | ~45% faster |
 
-The three samples compile and run with no generation attributes; inherited setters, attached setters, events, style setters, factories, `SourceInfo`, and `ViewFactory.Create<T>()` all work.
+The three samples compile and run with a single opt-in attribute each (`[assembly: GenerateGlobalControlFactories]`) for bare factories; inherited setters, attached setters, events, style setters, factories, `SourceInfo`, and `ViewFactory.Create<T>()` all work.
 
 ## 6. Risks and mitigations
 
@@ -146,8 +154,8 @@ The three samples compile and run with no generation attributes; inherited sette
 | --- | --- |
 | Control used only in compiled XAML, reflection, or a runtime-computed name | Local declarations are roots; referenced-library controls are found by name; `[assembly: GenerateMarkupControl(typeof(X))]` in the app is a narrow per-type opt-in. |
 | Inherited setters break without closure | R4 base-type closure; sample compilation is the gate. |
-| Name collisions | R3 preference + include-all + `SVCUIGEN006`. |
-| Global static import shadows types | `TypeAliasResolver` emits global aliases; when a name cannot be aliased (multiple resolved types or a user alias), `SVCUIGEN007` tells the user to qualify type usages. |
+| Name collisions | R3 include-all + `SVCUIGEN006`; colliding factory names are reported with `SVCUIGEN009` and suppressed. |
+| Global static import shadows types | The static import is opt-in and no aliases are generated; prefer a per-file `using static` or project-level `Using Static`. The `SVCUI001` analyzer reports shadowed identifiers and offers a `global::` fix. |
 | Metadata docs unavailable in compiler host | `DocumentationLookup` reads the XML beside each reference, cached at three levels. |
 | Breaking change for consumers | Alpha library — breaking changes are acceptable; recorded in `CHANGELOG.md`. |
 | Stale generated files when usage is removed | Source output emits the full set each run; Roslyn drops files not re-added. |
@@ -160,11 +168,13 @@ Follow-up from PR review:
 - Referenced assemblies are discovered through transitive Avalonia references, nested control types are enumerated, and referenced controls are indexed by both factory alias and CLR name.
 - Attached-property hosts are rooted from generated extension names (`Host_Property`), including non-control hosts.
 - Name collisions now keep all distinct candidates instead of preferring one.
-- Global aliases are skipped (with `SVCUIGEN007`) for inaccessible types, generic containers, user aliases, multiple resolved types, and global namespace conflicts.
-- `ViewFactory` registrations are emitted for every eligible control even when factory names collide.
+- Generated type aliases and `TypeAliasResolver` were removed: an injected static import plus generated aliases is not reproducible by tooling that formats or simplifies consumer source.
+- `ViewFactory` registrations are emitted for every eligible control even when factory names collide; `SVCUIGEN009` reports the collision instead of dropping factories silently.
 - Generation result is equatable and registered as the source-output input, so Roslyn caches unchanged files across edits.
 - Generator tests resolve the Avalonia reference path from MSBuild instead of a hard-coded NuGet cache.
 
 ## 7. Remaining work
 
-- The working tree is uncommitted; no release tag has been created.
+- Evaluate a descriptor-like description ↔ native-control separation for future generator work, without introducing a reconciler.
+- Provide source-generated option sets for frequently used attached properties where constructor-overload expansion becomes measurable.
+- See `docs/review-findings.md` for the full review and the status of its recommendations.
