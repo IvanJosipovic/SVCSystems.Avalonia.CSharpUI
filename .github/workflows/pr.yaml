@@ -9,3 +9,18 @@ jobs:
     permissions:
       contents: read
     uses: IvanJosipovic/templates/.github/workflows/csharp-build-test.yaml@main
+
+  analyzer-gate:
+    name: Analyzer gate (samples must be DSL-warning free)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      # A rule that never fires in the samples is either over-fit or gated too narrowly.
+      # Escalating only our own IDs avoids turning unrelated SDK warnings into blockers.
+      - name: Build with CSharpUI analyzer warnings as errors
+        run: dotnet build SVCSystems.Avalonia.CSharpUI.slnx -warnaserror:SVCUI001,SVCUI002,SVCUI003

@@ -7,10 +7,14 @@ namespace SVCSystems.Avalonia.CSharpUI.SourceGenerator.ExternalGenerators.Setter
 /// <summary>
 /// Constructor argument fragments for a value type. Both the value-setter and style-setter
 /// overload generators need them for every property of that type, so they are computed once per
-/// symbol instead of once per generated member.
+/// symbol instead of once per generated member. The list is capped: a value type with many
+/// constructors would otherwise multiply the generated API surface (and compile time) for every
+/// property of that type. The full-value setter remains available for any constructor not emitted.
 /// </summary>
 internal static class ConstructorOverloads
 {
+    private const int MaxOverloads = 8;
+
     private sealed class CacheEntry
     {
         internal ImmutableArray<(string Definitions, string Values)> Overloads = ImmutableArray<(string, string)>.Empty;
@@ -29,14 +33,20 @@ internal static class ConstructorOverloads
                     continue;
                 }
 
+                if (builder.Count >= MaxOverloads)
+                {
+                    break;
+                }
+
                 var parameters = constructor.Parameters;
                 var definitions = new string[parameters.Length];
                 var values = new string[parameters.Length];
                 for (var i = 0; i < parameters.Length; i++)
                 {
                     var parameter = parameters[i];
-                    definitions[i] = parameter.Type.GetFullTypeName() + " " + parameter.Name;
-                    values[i] = parameter.Name;
+                    var parameterName = NamingConventions.EscapeIdentifier(parameter.Name);
+                    definitions[i] = parameter.Type.GetFullTypeName() + " " + parameterName;
+                    values[i] = parameterName;
                 }
 
                 builder.Add((string.Join(", ", definitions), string.Join(", ", values)));

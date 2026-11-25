@@ -37,9 +37,13 @@
     <ProjectReference Include="..\SVCSystems.Avalonia.CSharpUI.SourceGenerator\SVCSystems.Avalonia.CSharpUI.SourceGenerator.csproj" ReferenceOutputAssembly="true">
       <PrivateAssets>all</PrivateAssets>
     </ProjectReference>
+    <!-- Build the analyzer before packing, but never take a runtime reference on it. -->
+    <ProjectReference Include="..\SVCSystems.Avalonia.CSharpUI.Analyzers\SVCSystems.Avalonia.CSharpUI.Analyzers.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
     <None Remove="$(OutputPath)/$(AssemblyName).SourceGenerator.dll" />
     <!-- Package the generator in the analyzer directory of the nuget package -->
     <None Include="../SVCSystems.Avalonia.CSharpUI.SourceGenerator/bin/$(Configuration)/netstandard2.0/SVCSystems.Avalonia.CSharpUI.SourceGenerator.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <!-- Package the analyzer + code fix alongside the generator. -->
+    <None Include="../SVCSystems.Avalonia.CSharpUI.Analyzers/bin/$(Configuration)/netstandard2.0/SVCSystems.Avalonia.CSharpUI.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>

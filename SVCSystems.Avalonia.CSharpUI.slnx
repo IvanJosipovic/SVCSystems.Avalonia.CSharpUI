@@ -8,7 +8,9 @@
   <Project Path="samples/SVCSystems.Avalonia.CSharpUI.Samples.Mvvm/SVCSystems.Avalonia.CSharpUI.Samples.Mvvm.csproj" />
   <Project Path="samples/SVCSystems.Avalonia.CSharpUI.Samples.CustomControls/SVCSystems.Avalonia.CSharpUI.Samples.CustomControls.csproj" />
   <Project Path="src/SVCSystems.Avalonia.CSharpUI.SourceGenerator/SVCSystems.Avalonia.CSharpUI.SourceGenerator.csproj" />
+  <Project Path="src/SVCSystems.Avalonia.CSharpUI.Analyzers/SVCSystems.Avalonia.CSharpUI.Analyzers.csproj" />
   <Project Path="src/SVCSystems.Avalonia.CSharpUI/SVCSystems.Avalonia.CSharpUI.csproj" />
+  <Project Path="tests/SVCSystems.Avalonia.CSharpUI.Analyzers.Tests/SVCSystems.Avalonia.CSharpUI.Analyzers.Tests.csproj" />
   <Project Path="tests/SVCSystems.Avalonia.CSharpUI.Tests/SVCSystems.Avalonia.CSharpUI.Tests.csproj" />
   <Project Path="tests/SVCSystems.Avalonia.CSharpUI.Tests.XamlFixtures/SVCSystems.Avalonia.CSharpUI.Tests.XamlFixtures.csproj" />
   <Project Path="benchmarks/SVCSystems.Avalonia.CSharpUI.SourceGenerator.Benchmarks/SVCSystems.Avalonia.CSharpUI.SourceGenerator.Benchmarks.csproj" />

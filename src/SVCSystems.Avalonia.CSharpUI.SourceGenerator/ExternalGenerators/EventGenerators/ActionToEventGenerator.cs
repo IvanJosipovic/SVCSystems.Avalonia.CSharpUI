@@ -32,35 +32,10 @@ internal sealed class ActionToEventGenerator : ExtensionGeneratorBase<EventExten
             return;
         }
 
-        var eventParameterTypes = @event.EventParameterTypes;
-        string argsString;
-        string lambdaParameters;
-        string actionCall;
-
-        if (eventParameterTypes.Count == 0)
-        {
-            argsString = "Action action";
-            lambdaParameters = string.Empty;
-            actionCall = "action()";
-        }
-        else if (@event.HasStandardSignature)
-        {
-            argsString = $"Action<{string.Join(", ", eventParameterTypes.Skip(1))}> action";
-            lambdaParameters = string.Join(", ", eventParameterTypes.Select((_, index) => $"arg{index}"));
-            actionCall = "action(arg1)";
-        }
-        else if (eventParameterTypes.Count == 1)
-        {
-            argsString = $"Action<{eventParameterTypes[0]}> action";
-            lambdaParameters = "arg0";
-            actionCall = "action(arg0)";
-        }
-        else
-        {
-            argsString = $"Action<{string.Join(", ", eventParameterTypes)}> action";
-            lambdaParameters = string.Join(", ", eventParameterTypes.Select((_, index) => $"arg{index}"));
-            actionCall = $"action({lambdaParameters})";
-        }
+        var shape = EventAdapterShapes.For(@event.EventParameterTypes, @event.HasStandardSignature);
+        var argsString = shape.ParameterList;
+        var lambdaParameters = shape.LambdaParameters;
+        var actionCall = shape.ActionCall;
 
         if (@event.IsRoutedEvent && @event.SupportsAddHandler)
         {

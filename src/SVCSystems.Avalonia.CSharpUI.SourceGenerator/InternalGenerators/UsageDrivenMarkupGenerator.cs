@@ -41,15 +41,17 @@ internal readonly struct GenerationDiagnostic : IEquatable<GenerationDiagnostic>
 {
     private readonly int _hash;
 
-    internal GenerationDiagnostic(string id, string message, DiagnosticSeverity severity)
+    internal GenerationDiagnostic(string id, string message, DiagnosticSeverity severity, string? locationMarker = null)
     {
         Id = id;
         Message = message;
         Severity = severity;
+        LocationMarker = locationMarker;
         unchecked
         {
             var hash = (id?.GetHashCode() ?? 0) * 397 ^ (message?.GetHashCode() ?? 0);
-            _hash = (hash * 397) ^ (int)severity;
+            hash = (hash * 397) ^ (int)severity;
+            _hash = (hash * 397) ^ (locationMarker?.GetHashCode() ?? 0);
         }
     }
 
@@ -59,10 +61,18 @@ internal readonly struct GenerationDiagnostic : IEquatable<GenerationDiagnostic>
 
     internal DiagnosticSeverity Severity { get; }
 
+    /// <summary>
+    /// A declaration id, not a <see cref="Location"/>: cached results may be reported by a later
+    /// compilation whose syntax trees are different objects. The current tree is found at report
+    /// time from this id.
+    /// </summary>
+    internal string? LocationMarker { get; }
+
     public bool Equals(GenerationDiagnostic other) =>
         string.Equals(Id, other.Id, StringComparison.Ordinal) &&
         string.Equals(Message, other.Message, StringComparison.Ordinal) &&
-        Severity == other.Severity;
+        Severity == other.Severity &&
+        string.Equals(LocationMarker, other.LocationMarker, StringComparison.Ordinal);
 
     public override bool Equals(object? obj) => obj is GenerationDiagnostic other && Equals(other);
 
@@ -128,6 +138,9 @@ internal sealed class GenerationResultComparer : IEqualityComparer<GenerationRes
 /// </summary>
 public sealed class UsageDrivenMarkupGenerator
 {
+    private const string GlobalFactoriesAttributeName =
+        "SVCSystems.Avalonia.CSharpUI.GenerateGlobalControlFactoriesAttribute";
+
     private sealed class TextBox
     {
         internal string Text = string.Empty;
@@ -159,14 +172,14 @@ public sealed class UsageDrivenMarkupGenerator
         isEnabledByDefault: true,
         description: "A control name used in source matched more than one type. All matches were generated so code compiles regardless of which type was meant.");
 
-    internal static readonly DiagnosticDescriptor UnaliasableFactoryName = new(
-        id: "SVCUIGEN007",
-        title: "Control factory name cannot be aliased",
-        messageFormat: "Control factory name '{0}' cannot be aliased because it {1}. Usages of that name as a type may be shadowed by the generated factory call, so qualify them with their namespace.",
+    internal static readonly DiagnosticDescriptor CollidingFactoryName = new(
+        id: "SVCUIGEN009",
+        title: "Colliding control factory name",
+        messageFormat: "Control factory name '{0}' is shared by {1} controls; no factory was generated. Set Alias on one control or construct the control explicitly.",
         category: "SVCSystems.Avalonia.CSharpUI",
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "A factory name is also used as a type, but a global alias cannot be generated for it. Qualify type usages with their namespace.");
+        description: "Two or more controls resolve to the same generated factory name. Factories for all of them are suppressed; registrations are still emitted.");
 
     internal static readonly DiagnosticDescriptor OverlappingPublishers = new(
         id: "SVCUIGEN008",
@@ -182,9 +195,9 @@ public sealed class UsageDrivenMarkupGenerator
         var names = UsageNameProvider.Create(context).Collect();
         var input = names.Combine(context.CompilationProvider);
 
-        // Produce an equatable result first. Registering the output on that result (instead of on
-        // the compilation) lets Roslyn cache it when an unrelated edit leaves generated text and
-        // diagnostics unchanged, instead of re-adding every file on each keystroke.
+        // Produce an equatable result first. Registering the source output on that result (instead
+        // of on the compilation) lets Roslyn cache it when an unrelated edit leaves generated text
+        // unchanged, instead of re-adding every file on each keystroke.
         var generation = input
             .Select(static (pair, cancellationToken) => Generate(pair.Left, pair.Right, cancellationToken))
             .WithComparer(GenerationResultComparer.Instance)
@@ -196,21 +209,52 @@ public sealed class UsageDrivenMarkupGenerator
             {
                 sourceContext.AddSource(source.HintName, SourceText.From(source.Text, Encoding.UTF8));
             }
-
-            foreach (var diagnostic in result.Diagnostics)
-            {
-                var descriptor = Descriptors.GetOrAdd(
-                    diagnostic.Id + "\0" + diagnostic.Message,
-                    _ => new DiagnosticDescriptor(
-                        diagnostic.Id,
-                        diagnostic.Id,
-                        diagnostic.Message,
-                        "SVCSystems.Avalonia.CSharpUI",
-                        diagnostic.Severity,
-                        isEnabledByDefault: true));
-                sourceContext.ReportDiagnostic(Diagnostic.Create(descriptor, Location.None));
-            }
         });
+
+        // Diagnostics need the current compilation: a cached result may come from an earlier
+        // compilation and can only be re-anchored to a syntax tree that belongs to this one.
+        context.RegisterSourceOutput(
+            generation.Combine(context.CompilationProvider),
+            static (sourceContext, pair) =>
+            {
+                foreach (var diagnostic in pair.Left.Diagnostics)
+                {
+                    var descriptor = Descriptors.GetOrAdd(
+                        diagnostic.Id + "\0" + diagnostic.Message,
+                        _ => new DiagnosticDescriptor(
+                            diagnostic.Id,
+                            diagnostic.Id,
+                            diagnostic.Message,
+                            "SVCSystems.Avalonia.CSharpUI",
+                            diagnostic.Severity,
+                            isEnabledByDefault: true));
+                    sourceContext.ReportDiagnostic(Diagnostic.Create(
+                        descriptor,
+                        ResolveDiagnosticLocation(diagnostic.LocationMarker, pair.Right)));
+                }
+            });
+    }
+
+    private static Location ResolveDiagnosticLocation(string? locationMarker, Compilation compilation)
+    {
+        if (locationMarker is null)
+        {
+            return Location.None;
+        }
+
+        var symbol = DocumentationCommentId.GetFirstSymbolForDeclarationId(locationMarker, compilation);
+        if (symbol is not null)
+        {
+            foreach (var location in symbol.Locations)
+            {
+                if (location.IsInSource)
+                {
+                    return location;
+                }
+            }
+        }
+
+        return Location.None;
     }
 
     private static GenerationResult Generate(
@@ -328,6 +372,31 @@ public sealed class UsageDrivenMarkupGenerator
             }
         }
 
+        // A factory name shared by two controls cannot be emitted unambiguously. GetFactoryTargets
+        // drops all such controls; report it at the source declaration instead of failing silently.
+        foreach (var group in models
+                     .Where(static model => model.GenerateFactory &&
+                                            model.IsConstructible &&
+                                            model.Type.IsOrInheritsFrom("Avalonia.Controls.Control"))
+                     .GroupBy(static model => SymbolUtilities.CleanIdentifier(model.FactoryName) ?? model.Type.Name,
+                         StringComparer.Ordinal)
+                     .Where(static group => group.Count() > 1))
+        {
+            // Keep a stable declaration id rather than a Location: the cached result can be
+            // reported by another compilation whose syntax trees are different objects.
+            var declaration = group
+                .Select(static model => model.Type)
+                .FirstOrDefault(static type => type.Locations.Any(static location => location.IsInSource));
+            var locationMarker = declaration is null
+                ? null
+                : DocumentationCommentId.CreateDeclarationId(declaration);
+            diagnostics.Add(new GenerationDiagnostic(
+                "SVCUIGEN009",
+                string.Format(CollidingFactoryName.MessageFormat.ToString(), group.Key, group.Count()),
+                DiagnosticSeverity.Warning,
+                locationMarker));
+        }
+
         var host = SharedHost;
         foreach (var model in models)
         {
@@ -374,7 +443,7 @@ public sealed class UsageDrivenMarkupGenerator
         }
 
         var factoryTargets = GetFactoryTargets(models);
-        GenerateFactoryUsings(sources, diagnostics, compilation, factoryTargets, cancellationToken);
+        GenerateFactoryUsings(sources, compilation);
         GenerateFactories(sources, compilation, factoryTargets);
         GenerateRegistrations(sources, GetRegistrationTargets(models));
 
@@ -388,34 +457,24 @@ public sealed class UsageDrivenMarkupGenerator
         return new GenerationResult(sources.ToImmutableArray(), diagnostics.ToImmutableArray());
     }
 
-    private static void GenerateFactoryUsings(
-        List<GeneratedSource> sources,
-        List<GenerationDiagnostic> diagnostics,
-        Compilation compilation,
-        IReadOnlyList<ControlModel> factories,
-        CancellationToken cancellationToken)
+    /// <summary>
+    /// Emits the global static factory import only when the consumer explicitly opts in with
+    /// <c>[assembly: GenerateGlobalControlFactories]</c>. No type aliases are generated: a generated
+    /// static import can shadow type names, and patching that with more generated aliases breaks
+    /// tooling that does not reproduce the generated compilation. Consumers should prefer a
+    /// per-file <c>using static</c> or a hand-written project-level <c>Using Static</c> item.
+    /// </summary>
+    private static void GenerateFactoryUsings(List<GeneratedSource> sources, Compilation compilation)
     {
-        var factoryNames = new HashSet<string>(
-            factories.Select(static model => SymbolUtilities.CleanIdentifier(model.FactoryName) ?? model.Type.Name),
-            StringComparer.Ordinal);
-        var resolution = TypeAliasResolver.Resolve(compilation, factoryNames, cancellationToken);
-
-        foreach (var skipped in resolution.Skipped)
+        if (!compilation.Assembly.GetAttributes().Any(static attribute =>
+                attribute.AttributeClass?.ToDisplayString() == GlobalFactoriesAttributeName))
         {
-            diagnostics.Add(new GenerationDiagnostic(
-                "SVCUIGEN007",
-                string.Format(UnaliasableFactoryName.MessageFormat.ToString(), skipped.Name, skipped.Reason),
-                DiagnosticSeverity.Warning));
+            return;
         }
 
-        var source = new StringBuilder(512);
+        var source = new StringBuilder(128);
         source.AppendLine("// <auto-generated />");
         source.AppendLine("global using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;");
-        foreach (var alias in resolution.Aliases)
-        {
-            source.AppendLine($"global using {alias.Key} = {alias.Value};");
-        }
-
         sources.Add(new GeneratedSource("SVCSystemsAvaloniaFactoryUsings.g.cs", source.ToString()));
     }
 

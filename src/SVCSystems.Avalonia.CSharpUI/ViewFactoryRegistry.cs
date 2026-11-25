@@ -15,11 +15,26 @@ public static class ViewFactoryRegistry
     /// Registers a factory delegate for a control type.
     /// Intended for source-generated code.
     /// </summary>
+    /// <remarks>
+    /// Registration is deterministic first-wins: when a factory for <typeparamref name="TControl"/>
+    /// already exists the new delegate is ignored and a warning is recorded in
+    /// <see cref="Diagnostics.DiagnosticsErrorLog"/>. This avoids making the winner depend on
+    /// module-initializer ordering when several assemblies register the same control type.
+    /// </remarks>
     public static void Register<TControl>(Func<TControl> factory)
         where TControl : Control
     {
         ArgumentNullException.ThrowIfNull(factory);
-        Factories[typeof(TControl)] = () => factory();
+
+        var controlType = typeof(TControl);
+        if (!Factories.TryAdd(controlType, () => factory()))
+        {
+            Diagnostics.DiagnosticsErrorLog.Record(
+                Diagnostics.DiagnosticSeverity.Warning,
+                Diagnostics.DiagnosticCategory.Other,
+                nameof(ViewFactoryRegistry),
+                $"A factory for '{controlType.FullName}' is already registered; the first registration wins and this duplicate was ignored.");
+        }
     }
 
     internal static bool TryCreate<TControl>(out TControl control)

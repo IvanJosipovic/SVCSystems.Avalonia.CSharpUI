@@ -36,7 +36,7 @@ public sealed class GreetingView(GreetingViewModel viewModel) : ViewBase<Greetin
 }
 ```
 
-Generated factory methods create ordinary Avalonia controls and attach their call-site file, line, view type, and control type as source metadata. No `using static` directive is needed: the generator emits a global static import and the type aliases needed to keep names like `Path.Combine` and `new Grid()` working, so `Button()` works in any source file.
+Generated factory methods create ordinary Avalonia controls and attach their call-site file, line, view type, and control type as source metadata. Bare `Button()` calls need a consumer-authored import: add `using static SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories;` to a file, or `<Using Include="SVCSystems.Avalonia.CSharpUI.GeneratedControlFactories" Static="true" />` to the project. A whole project can opt into a generated global import with `[assembly: GenerateGlobalControlFactories]`. No generated type aliases are emitted; qualify names such as `Path.Combine` when a static import shadows them (the `SVCUI001` analyzer offers a `global::` fix).
 
 Generation is usage-driven: extensions, factories, and registrations are emitted only for controls mentioned in your source (plus their base types) and for a curated list of common Avalonia controls declared with `typeof(...)` in the library. Controls in referenced assemblies are discovered by name without extra attributes. See [the architecture guide](docs/architecture.md) for details.
 
@@ -95,7 +95,7 @@ dotnet build
 dotnet test
 ```
 
-The library targets `net10.0` and `net11.0`. The source generator targets `netstandard2.0` so it can run in compiler hosts used by supported IDEs.
+The library targets `net10.0` and `net11.0`. See [the testing tiers](docs/testing.md) for which suite to extend when changing the generator, analyzer, or runtime. The source generator targets `netstandard2.0` so it can run in compiler hosts used by supported IDEs.
 
 ## Benchmarks
 

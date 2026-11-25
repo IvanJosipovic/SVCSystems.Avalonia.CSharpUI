@@ -4,6 +4,12 @@ root = true
 # C# files
 [*.cs]
 
+# Generated global usings/aliases must not be simplified away: IDE0001/0002/0005 would rewrite
+# them into names that the generated factory methods shadow (see SVCUI001).
+dotnet_diagnostic.IDE0001.severity = none
+dotnet_diagnostic.IDE0002.severity = none
+dotnet_diagnostic.IDE0005.severity = none
+
 #### Core EditorConfig Options ####
 
 # Indentation and spacing

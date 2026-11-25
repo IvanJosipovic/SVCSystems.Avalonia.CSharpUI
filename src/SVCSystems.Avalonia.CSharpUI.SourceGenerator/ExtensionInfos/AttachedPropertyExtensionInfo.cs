@@ -11,7 +11,7 @@ internal sealed class AttachedPropertyExtensionInfo : PropertyExtensionInfo
     public AttachedPropertyExtensionInfo(IFieldSymbol field, string? extensionName = null, Compilation? compilation = null)
         : base(field, extensionName, compilation)
     {
-        ExtensionName = $"{field.ContainingType.Name.Split('`')[0]}_{ExtensionName}";
+        ExtensionName = NamingConventions.AttachedPropertyName(field.ContainingType.Name, ExtensionName);
 
         if (field.ContainingType.GetMembers($"Set{MemberName}").FirstOrDefault() is IMethodSymbol setter &&
             setter.Parameters.Length > 0)
